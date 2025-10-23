@@ -12,6 +12,7 @@
   "dependencies": {
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
-    "twilio": "^5.10.3"
+    "twilio": "^5.10.3",
+    "@supabase/supabase-js": "^2.44.4"
   }
 }
