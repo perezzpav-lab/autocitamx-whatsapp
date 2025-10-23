@@ -1,39 +1,44 @@
+// ==============================
+// AutoCitaMX WhatsApp - Render
+// ==============================
+
 const express = require("express");
+const twilio = require("twilio");
 const app = express();
 
-// 👇 Necesario para leer el body x-www-form-urlencoded de Twilio
+// Permite leer datos que envía Twilio en formato x-www-form-urlencoded
 app.use(express.urlencoded({ extended: false }));
 
-// (Opcional) Diagnóstico de env: ¡esto sí puede ir arriba porque no usa app!
-console.log("ENV_DIAG", {
-  SID: !!process.env.TWILIO_ACCOUNT_SID,
-  TOKEN: !!process.env.TWILIO_AUTH_TOKEN,
-  FROM: process.env.WHATSAPP_FROM
-});
-
-// ✅ Ruta raíz para ver que el servicio está vivo
+// Mensaje para verificar que el servidor está en línea
 app.get("/", (_, res) => res.send("AutoCitaMX WhatsApp OK 🚀"));
 
-// ✅ Ruta de diagnóstico (temporal). OJO: ahora sí DESPUÉS de crear app
-app.get("/diag/env", (_, res) => {
-  res.json({
-    SID: !!process.env.TWILIO_ACCOUNT_SID,
-    TOKEN: !!process.env.TWILIO_AUTH_TOKEN,
-    FROM: process.env.WHATSAPP_FROM || null
-  });
-});
-
-// ✅ Webhook WhatsApp (versión mínima segura para probar)
-app.post("/whatsapp", async (req, res) => {
+// Webhook principal de WhatsApp
+app.post("/whatsapp", (req, res) => {
   try {
     console.log("Webhook Twilio:", req.body);
-    // Respuesta mínima válida para Twilio
-    return res.type("text/xml").status(200).send("<Response></Response>");
-  } catch (e) {
-    console.error("Error /whatsapp:", e);
+
+    // Crear respuesta de Twilio (TwiML)
+    const twiml = new twilio.twiml.MessagingResponse();
+    twiml.message(
+      "¡Hola! Soy AutoCitaMX 🤖\n\n" +
+      "1️⃣ Agendar cita\n" +
+      "2️⃣ Consultar cita\n" +
+      "3️⃣ Cancelar cita\n\n" +
+      "Responde con el número de la opción que desees."
+    );
+
+    // Enviar respuesta XML a Twilio
+    return res.type("text/xml").status(200).send(twiml.toString());
+  } catch (error) {
+    console.error("Error en /whatsapp:", error);
+    // Siempre responder 200 para que Twilio no marque error
     return res.type("text/xml").status(200).send("<Response></Response>");
   }
 });
+
+// Puerto que asigna Render automáticamente
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`AutoCitaMX WhatsApp corriendo en puerto ${PORT}`));
 
 // Puerto asignado por Render
 const PORT = process.env.PORT || 3000;
