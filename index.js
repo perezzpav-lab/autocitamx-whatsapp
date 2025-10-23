@@ -190,7 +190,7 @@ app.post("/whatsapp", (req, res) => {
   res.type("text/xml").status(200).send(twiml.toString());
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`[dotenv] OK • AutoCitaMX WhatsApp corriendo en puerto ${port}`);
+const PORT = Number(process.env.PORT) || 3000;
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`[dotenv] OK • AutoCitaMX WhatsApp corriendo en puerto ${PORT}`);
 });
