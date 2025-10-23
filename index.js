@@ -1,14 +1,31 @@
+// ================================
+// AutoCitaMX WhatsApp + Supabase
+// ================================
+
 const express = require("express");
 const twilio = require("twilio");
+const { createClient } = require("@supabase/supabase-js");
 require("dotenv").config();
 
 const app = express();
 app.use(express.urlencoded({ extended: true })); // Twilio envía application/x-www-form-urlencoded
 
-// Sesiones en memoria (DEMO). Producción: Redis/DB.
+// =====================================
+// 🔹 CONEXIÓN A SUPABASE
+// =====================================
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_ANON_KEY
+);
+
+// =====================================
+// 🔹 SESIONES EN MEMORIA (demo)
+// =====================================
 const sessions = new Map();
 
-// Catálogo de servicios (ejemplo)
+// =====================================
+// 🔹 CATÁLOGO DE SERVICIOS
+// =====================================
 const SERVICES = [
   { name: "Corte", mins: 30, price: 120 },
   { name: "Barba", mins: 20, price: 90 },
@@ -24,7 +41,9 @@ const MAIN_MENU =
   "Escribe el *número* de opción.\n" +
   "_Comandos: *menu*, *reiniciar*._";
 
-// Normaliza texto (quita acentos, espacios extra, minúsculas)
+// =====================================
+// 🔹 FUNCIÓN: normalizar texto
+// =====================================
 function norm(text = "") {
   return String(text || "")
     .trim()
@@ -33,11 +52,15 @@ function norm(text = "") {
     .replace(/[\u0300-\u036f]/g, "");
 }
 
-// Healthcheck
+// =====================================
+// 🔹 HEALTH CHECK
+// =====================================
 app.get("/", (_, res) => res.send("AutoCitaMX WhatsApp OK 🚀"));
 
-// Webhook de WhatsApp
-app.post("/whatsapp", (req, res) => {
+// =====================================
+// 🔹 WEBHOOK PRINCIPAL (Twilio WhatsApp)
+// =====================================
+app.post("/whatsapp", async (req, res) => {
   const { From = "", Body = "" } = req.body || {};
   const bodyRaw = (Body || "").trim();
   const body = norm(bodyRaw);
@@ -48,7 +71,6 @@ app.post("/whatsapp", (req, res) => {
   // Recuperar o iniciar sesión
   const s = sessions.get(From) || { step: "menu", data: {} };
 
-  // Log útil en servidor
   console.log("IN:", { From, Body: bodyRaw, step: s.step, data: s.data });
 
   try {
@@ -62,13 +84,17 @@ app.post("/whatsapp", (req, res) => {
       return;
     }
 
-    // Máquina de estados
+    // =====================================
+    // 🔹 LÓGICA PRINCIPAL
+    // =====================================
     switch (s.step) {
       case "menu": {
         if (["1", "2", "3"].includes(body)) {
           if (body === "1") {
             s.step = "service";
-            const list = SERVICES.map((x, i) => `${i + 1}) ${x.name} — ~$${x.price} MXN`).join("\n");
+            const list = SERVICES.map(
+              (x, i) => `${i + 1}) ${x.name} — ~$${x.price} MXN`
+            ).join("\n");
             twiml.message(`🗓️ ¿Qué servicio?\n${list}\n\nResponde con el *número*.`);
           } else if (body === "2") {
             s.step = "lookupRef";
@@ -86,7 +112,9 @@ app.post("/whatsapp", (req, res) => {
       case "service": {
         const idx = parseInt(body, 10) - 1;
         if (Number.isNaN(idx) || idx < 0 || idx >= SERVICES.length) {
-          const list = SERVICES.map((x, i) => `${i + 1}) ${x.name} — ~$${x.price} MXN`).join("\n");
+          const list = SERVICES.map(
+            (x, i) => `${i + 1}) ${x.name} — ~$${x.price} MXN`
+          ).join("\n");
           twiml.message(`❌ Opción no válida.\n\n${list}\nResponde con el *número*.`);
         } else {
           s.data.service = SERVICES[idx].name;
@@ -120,7 +148,32 @@ app.post("/whatsapp", (req, res) => {
           s.data.ref = ref;
           s.step = "menu";
 
-          const payLink = `https://autocitamx.mx/pagar/${encodeURIComponent(ref)}`; // demo
+          // ===============================
+          // 🔹 GUARDAR CITA EN SUPABASE
+          // ===============================
+          try {
+            const { error } = await supabase.from("appointments").insert([
+              {
+                ref,
+                phone: From,
+                service: s.data.service,
+                date: s.data.date,
+                time: s.data.time,
+                price: s.data.price,
+                status: "confirmada",
+              },
+            ]);
+
+            if (error) console.error("❌ Error guardando cita:", error);
+            else console.log("✅ Cita guardada en Supabase:", ref);
+          } catch (e) {
+            console.error("⚠️ Error inesperado guardando cita:", e);
+          }
+
+          // ===============================
+          // 🔹 MENSAJE DE CONFIRMACIÓN
+          // ===============================
+          const payLink = `https://autocitamx.mx/pagar/${encodeURIComponent(ref)}`;
           twiml.message(
             "✅ *Cita confirmada*\n" +
               `• Servicio: *${s.data.service}*\n` +
@@ -131,7 +184,7 @@ app.post("/whatsapp", (req, res) => {
               'O responde "3" en cualquier momento.'
           );
 
-          // Limpia (demo) y vuelve al menú
+          // Limpia y vuelve al menú
           s.data = {};
         }
         break;
@@ -161,7 +214,7 @@ app.post("/whatsapp", (req, res) => {
           twiml.message("❌ Folio inválido. Formato: *ACT-1234*.\nIntenta de nuevo o escribe *menu*.");
         } else {
           s.step = "menu";
-          const payLink = `https://autocitamx.mx/pagar/${encodeURIComponent(ref)}`; // demo
+          const payLink = `https://autocitamx.mx/pagar/${encodeURIComponent(ref)}`;
           twiml.message(
             `💳 Pago para *${ref}*\n` +
               `Enlace: ${payLink}\n\n` +
@@ -185,11 +238,13 @@ app.post("/whatsapp", (req, res) => {
     twiml.message("😖 Ocurrió un error. Volvamos al menú:\n\n" + MAIN_MENU);
   }
 
-  // Guardar sesión y responder
   sessions.set(From, s);
   res.type("text/xml").status(200).send(twiml.toString());
 });
 
+// =====================================
+// 🔹 INICIAR SERVIDOR EN RENDER
+// =====================================
 const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[dotenv] OK • AutoCitaMX WhatsApp corriendo en puerto ${PORT}`);
