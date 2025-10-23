@@ -3,13 +3,12 @@ const twilio = require("twilio");
 require("dotenv").config();
 
 const app = express();
-// Twilio envía application/x-www-form-urlencoded
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true })); // Twilio envía application/x-www-form-urlencoded
 
-// ⚠️ Sesiones en memoria (demo). En producción: DB/Redis.
+// Sesiones en memoria (DEMO). Producción: Redis/DB.
 const sessions = new Map();
 
-// Catálogo de servicios (ejemplo barbershop)
+// Catálogo de servicios (ejemplo)
 const SERVICES = [
   { name: "Corte", mins: 30, price: 120 },
   { name: "Barba", mins: 20, price: 90 },
@@ -25,16 +24,16 @@ const MAIN_MENU =
   "Escribe el *número* de opción.\n" +
   "_Comandos: *menu*, *reiniciar*._";
 
-// Utilidad: normalizar texto entrante
+// Normaliza texto (quita acentos, espacios extra, minúsculas)
 function norm(text = "") {
   return String(text || "")
     .trim()
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, ""); // quita acentos
+    .replace(/[\u0300-\u036f]/g, "");
 }
 
-// Raíz para chequeo rápido
+// Healthcheck
 app.get("/", (_, res) => res.send("AutoCitaMX WhatsApp OK 🚀"));
 
 // Webhook de WhatsApp
@@ -42,13 +41,14 @@ app.post("/whatsapp", (req, res) => {
   const { From = "", Body = "" } = req.body || {};
   const bodyRaw = (Body || "").trim();
   const body = norm(bodyRaw);
+
   const MessagingResponse = twilio.twiml.MessagingResponse;
   const twiml = new MessagingResponse();
 
-  // Recuperar/crear sesión
+  // Recuperar o iniciar sesión
   const s = sessions.get(From) || { step: "menu", data: {} };
 
-  // Logs para depurar en terminal
+  // Log útil en servidor
   console.log("IN:", { From, Body: bodyRaw, step: s.step, data: s.data });
 
   try {
@@ -70,17 +70,14 @@ app.post("/whatsapp", (req, res) => {
             s.step = "service";
             const list = SERVICES.map((x, i) => `${i + 1}) ${x.name} — ~$${x.price} MXN`).join("\n");
             twiml.message(`🗓️ ¿Qué servicio?\n${list}\n\nResponde con el *número*.`);
-          }
-          if (body === "2") {
+          } else if (body === "2") {
             s.step = "lookupRef";
             twiml.message("🔎 Dame tu *folio de cita* (ej. ACT-1234).");
-          }
-          if (body === "3") {
+          } else if (body === "3") {
             s.step = "payRef";
             twiml.message("💳 Dame tu *folio de pago/cita* (ej. ACT-1234).");
           }
         } else {
-          // Si pone “hola”, “buenas”, números no válidos, etc → vuelve a menú
           twiml.message(MAIN_MENU);
         }
         break;
@@ -97,7 +94,7 @@ app.post("/whatsapp", (req, res) => {
           s.step = "date";
           twiml.message(
             `📌 Servicio: *${s.data.service}* (~$${s.data.price} MXN)\n` +
-            "📅 Indica fecha en formato *YYYY-MM-DD* (ej. 2025-10-25)."
+              "📅 Indica fecha en formato *YYYY-MM-DD* (ej. 2025-10-25)."
           );
         }
         break;
@@ -126,15 +123,15 @@ app.post("/whatsapp", (req, res) => {
           const payLink = `https://autocitamx.mx/pagar/${encodeURIComponent(ref)}`; // demo
           twiml.message(
             "✅ *Cita confirmada*\n" +
-            `• Servicio: *${s.data.service}*\n` +
-            `• Fecha: *${s.data.date}* a las *${s.data.time}*\n` +
-            `• Folio: *${ref}*\n` +
-            `• Estimado: ~$${s.data.price} MXN\n\n` +
-            `💳 Para pagar ahora: ${payLink}\n` +
-            'O responde "3" en cualquier momento.'
+              `• Servicio: *${s.data.service}*\n` +
+              `• Fecha: *${s.data.date}* a las *${s.data.time}*\n` +
+              `• Folio: *${ref}*\n` +
+              `• Estimado: ~$${s.data.price} MXN\n\n` +
+              `💳 Para pagar ahora: ${payLink}\n` +
+              'O responde "3" en cualquier momento.'
           );
 
-          // Limpia datos de la cita (en demo) y regresa a menú
+          // Limpia (demo) y vuelve al menú
           s.data = {};
         }
         break;
@@ -148,11 +145,11 @@ app.post("/whatsapp", (req, res) => {
           s.step = "menu";
           twiml.message(
             `📄 Detalles de *${ref}*:\n` +
-            "• Estado: Confirmada\n" +
-            "• Fecha/Hora: 2025-10-25 15:30\n" +
-            "• Servicio: Corte\n" +
-            "• Pago: Pendiente\n\n" +
-            "Escribe *pagar* o *menu*."
+              "• Estado: Confirmada\n" +
+              "• Fecha/Hora: 2025-10-25 15:30\n" +
+              "• Servicio: Corte\n" +
+              "• Pago: Pendiente\n\n" +
+              "Escribe *pagar* o *menu*."
           );
         }
         break;
@@ -167,8 +164,8 @@ app.post("/whatsapp", (req, res) => {
           const payLink = `https://autocitamx.mx/pagar/${encodeURIComponent(ref)}`; // demo
           twiml.message(
             `💳 Pago para *${ref}*\n` +
-            `Enlace: ${payLink}\n\n` +
-            "Te enviaremos recibo por WhatsApp al confirmar."
+              `Enlace: ${payLink}\n\n` +
+              "Te enviaremos recibo por WhatsApp al confirmar."
           );
         }
         break;
@@ -178,6 +175,7 @@ app.post("/whatsapp", (req, res) => {
         s.step = "menu";
         s.data = {};
         twiml.message(MAIN_MENU);
+        break;
       }
     }
   } catch (err) {
@@ -187,10 +185,8 @@ app.post("/whatsapp", (req, res) => {
     twiml.message("😖 Ocurrió un error. Volvamos al menú:\n\n" + MAIN_MENU);
   }
 
-  // Guardar sesión
+  // Guardar sesión y responder
   sessions.set(From, s);
-
-  // Responder Twilio
   res.type("text/xml").status(200).send(twiml.toString());
 });
 
@@ -198,9 +194,3 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`[dotenv] OK • AutoCitaMX WhatsApp corriendo en puerto ${port}`);
 });
-
-});
-
-// IMPORTANTE: una sola declaración y un solo listen
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`AutoCitaMX WhatsApp corriendo en puerto ${port}`));
