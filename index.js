@@ -1,5 +1,22 @@
 const express = require("express");
 const twilio = require("twilio");
+// === DIAGNÓSTICO DE ENV (puedes borrar luego) ===
+console.log("ENV_DIAG", {
+  SID: !!process.env.TWILIO_ACCOUNT_SID,
+  TOKEN: !!process.env.TWILIO_AUTH_TOKEN,
+  FROM: process.env.WHATSAPP_FROM
+});
+
+// Ruta temporal para ver env desde el navegador
+app.get("/diag/env", (_, res) => {
+  res.json({
+    SID: !!process.env.TWILIO_ACCOUNT_SID,
+    TOKEN: !!process.env.TWILIO_AUTH_TOKEN,
+    FROM: process.env.WHATSAPP_FROM || null
+  });
+});
+// === FIN DIAGNÓSTICO ===
+
 require("dotenv").config();
 
 const app = express();
