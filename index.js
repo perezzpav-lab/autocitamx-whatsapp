@@ -12,6 +12,8 @@ app.use(express.urlencoded({ extended: true })); // Twilio envía application/x-
 
 // =====================================
 // 🔹 CONEXIÓN A SUPABASE
+//    Requiere en Render (Settings → Environment):
+//    SUPABASE_URL, SUPABASE_ANON_KEY
 // =====================================
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -20,6 +22,7 @@ const supabase = createClient(
 
 // =====================================
 // 🔹 SESIONES EN MEMORIA (demo)
+//    (Producción: Redis/DB)
 // =====================================
 const sessions = new Map();
 
@@ -55,10 +58,12 @@ function norm(text = "") {
 // =====================================
 // 🔹 HEALTH CHECK
 // =====================================
-app.get("/", (_, res) => res.send("AutoCitaMX WhatsApp OK 🚀"));
+app.get("/", (_req, res) => res.status(200).send("AutoCitaMX WhatsApp OK 🚀"));
 
 // =====================================
 // 🔹 WEBHOOK PRINCIPAL (Twilio WhatsApp)
+//    Configura en Twilio Sandbox:
+//    WHEN A MESSAGE COMES IN → POST https://TU-SERVICIO.onrender.com/whatsapp
 // =====================================
 app.post("/whatsapp", async (req, res) => {
   const { From = "", Body = "" } = req.body || {};
@@ -80,8 +85,7 @@ app.post("/whatsapp", async (req, res) => {
       s.data = {};
       twiml.message(MAIN_MENU);
       sessions.set(From, s);
-      res.type("text/xml").status(200).send(twiml.toString());
-      return;
+      return res.type("text/xml").status(200).send(twiml.toString());
     }
 
     // =====================================
@@ -146,33 +150,8 @@ app.post("/whatsapp", async (req, res) => {
           s.data.time = bodyRaw;
           const ref = "ACT-" + Math.floor(1000 + Math.random() * 9000);
           s.data.ref = ref;
-          s.step = "menu";
 
-          // ===============================
-          // 🔹 GUARDAR CITA EN SUPABASE
-          // ===============================
-          try {
-            const { error } = await supabase.from("appointments").insert([
-              {
-                ref,
-                phone: From,
-                service: s.data.service,
-                date: s.data.date,
-                time: s.data.time,
-                price: s.data.price,
-                status: "confirmada",
-              },
-            ]);
-
-            if (error) console.error("❌ Error guardando cita:", error);
-            else console.log("✅ Cita guardada en Supabase:", ref);
-          } catch (e) {
-            console.error("⚠️ Error inesperado guardando cita:", e);
-          }
-
-          // ===============================
-          // 🔹 MENSAJE DE CONFIRMACIÓN
-          // ===============================
+          // 1) Construir y ENVIAR la confirmación YA (responder rápido a Twilio)
           const payLink = `https://autocitamx.mx/pagar/${encodeURIComponent(ref)}`;
           twiml.message(
             "✅ *Cita confirmada*\n" +
@@ -184,7 +163,30 @@ app.post("/whatsapp", async (req, res) => {
               'O responde "3" en cualquier momento.'
           );
 
-          // Limpia y vuelve al menú
+          // 2) Guardar la cita en Supabase SIN await (fire-and-forget)
+          supabase
+            .from("appointments")
+            .insert([
+              {
+                ref,
+                phone: From,
+                service: s.data.service,
+                date: s.data.date,
+                time: s.data.time,
+                price: s.data.price,
+                status: "confirmada",
+              },
+            ])
+            .then(({ error }) => {
+              if (error) console.error("❌ Error guardando cita:", error);
+              else console.log("✅ Cita guardada en Supabase:", ref);
+            })
+            .catch((e) => {
+              console.error("⚠️ Error inesperado guardando cita:", e);
+            });
+
+          // 3) Dejar lista la sesión para el siguiente turno
+          s.step = "menu";
           s.data = {};
         }
         break;
@@ -196,6 +198,7 @@ app.post("/whatsapp", async (req, res) => {
           twiml.message("❌ Folio inválido. Formato: *ACT-1234*.\nIntenta de nuevo o escribe *menu*.");
         } else {
           s.step = "menu";
+          // (Demo) Aquí podrías consultar Supabase por ref y responder dinámico
           twiml.message(
             `📄 Detalles de *${ref}*:\n` +
               "• Estado: Confirmada\n" +
@@ -238,14 +241,15 @@ app.post("/whatsapp", async (req, res) => {
     twiml.message("😖 Ocurrió un error. Volvamos al menú:\n\n" + MAIN_MENU);
   }
 
+  // Guardar sesión y responder a Twilio
   sessions.set(From, s);
-  res.type("text/xml").status(200).send(twiml.toString());
+  return res.type("text/xml").status(200).send(twiml.toString());
 });
 
 // =====================================
 // 🔹 INICIAR SERVIDOR EN RENDER
 // =====================================
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.PORT) || 3000; // 3000 solo local
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[dotenv] OK • AutoCitaMX WhatsApp corriendo en puerto ${PORT}`);
 });
