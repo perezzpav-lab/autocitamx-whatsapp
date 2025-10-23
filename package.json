@@ -15,4 +15,3 @@
     "twilio": "^5.10.3"
   }
 }
-npm install @supabase/supabase-js
