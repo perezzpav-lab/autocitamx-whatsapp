@@ -13,6 +13,8 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+// PATCH: opcional, útil como "from" por defecto en pruebas
+const TWILIO_WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || ""; // ej: "whatsapp:+52XXXXXXXXXX"
 
 // === SUPABASE (tus datos) ===
 const SUPABASE_URL = "https://qffstwhizihtexfompwe.supabase.co";
@@ -153,9 +155,17 @@ app.get("/whatsapp", (_req, res) => res.send("WhatsApp webhook up ✅"));
 
 // === WEBHOOK WHATSAPP ===
 app.post("/whatsapp", async (req, res) => {
-  const from = req.body.From || "";
-  const to = req.body.To || "";
-  const body = (req.body.Body || "").trim();
+  // PATCH: logs útiles siempre
+  console.log("➡️  POST /whatsapp");
+  console.log("🧾 headers:", req.headers);
+  console.log("📦 body:", req.body);
+
+  // PATCH: normaliza from/to y aplica fallback opcional de env
+  const from = req.body.From || req.body.from || "";
+  let to = req.body.To || req.body.to || "";
+  if (!to && TWILIO_WHATSAPP_FROM) to = TWILIO_WHATSAPP_FROM; // opcional
+
+  const body = (req.body.Body || req.body.body || "").trim();
   const nombre = firstName(req.body.ProfileName);
 
   try {
@@ -163,14 +173,15 @@ app.post("/whatsapp", async (req, res) => {
 
     // Comandos cortos
     if (["hola", "menu", "menú", "inicio", "start"].includes(lower)) {
-      if (twilioClient) {
+      // PATCH: solo enviamos si hay client y from/to válidos (whatsapp:+...)
+      if (twilioClient && /^whatsapp:\+/.test(from) && /^whatsapp:\+/.test(to)) {
         await twilioClient.messages.create({
           from: to,
           to: from,
           body: menuTexto(nombre),
         });
       }
-      return res.status(200).send("OK");
+      return res.status(200).type("text/plain").send("OK");
     }
 
     // Confirmación SI/NO con sesión
@@ -189,38 +200,38 @@ app.post("/whatsapp", async (req, res) => {
         await sbInsert(row);
         sessions.delete(from);
 
-        if (twilioClient) {
+        if (twilioClient && /^whatsapp:\+/.test(from) && /^whatsapp:\+/.test(to)) {
           await twilioClient.messages.create({
             from: to,
             to: from,
             body: `✅ Confirmado.\n${resumen(row)}`,
           });
         }
-        return res.status(200).send("OK");
+        return res.status(200).type("text/plain").send("OK");
       }
 
       if (["no", "no.", "cancelar", "cambiar"].includes(lower)) {
         sessions.delete(from);
-        if (twilioClient) {
+        if (twilioClient && /^whatsapp:\+/.test(from) && /^whatsapp:\+/.test(to)) {
           await twilioClient.messages.create({
             from: to,
             to: from,
             body: `Sin problema, ${nombre}. ${menuTexto(nombre)}`,
           });
         }
-        return res.status(200).send("OK");
+        return res.status(200).type("text/plain").send("OK");
       }
 
       // Cualquier otra cosa: re-enviar resumen
       const s = sessions.get(from);
-      if (twilioClient) {
+      if (twilioClient && /^whatsapp:\+/.test(from) && /^whatsapp:\+/.test(to)) {
         await twilioClient.messages.create({
           from: to,
           to: from,
           body: `¿Confirmas esta cita? Responde SI o NO.\n${resumen(s)}`,
         });
       }
-      return res.status(200).send("OK");
+      return res.status(200).type("text/plain").send("OK");
     }
 
     // Menú numérico
@@ -237,7 +248,7 @@ app.post("/whatsapp", async (req, res) => {
       };
       sessions.set(from, s);
 
-      if (twilioClient) {
+      if (twilioClient && /^whatsapp:\+/.test(from) && /^whatsapp:\+/.test(to)) {
         await twilioClient.messages.create({
           from: to,
           to: from,
@@ -248,7 +259,7 @@ app.post("/whatsapp", async (req, res) => {
             `También puedes mandar: "Barba 31/10 12:30 90"`,
         });
       }
-      return res.status(200).send("OK");
+      return res.status(200).type("text/plain").send("OK");
     }
 
     // Parseo libre
@@ -263,7 +274,7 @@ app.post("/whatsapp", async (req, res) => {
     };
     sessions.set(from, s);
 
-    if (twilioClient) {
+    if (twilioClient && /^whatsapp:\+/.test(from) && /^whatsapp:\+/.test(to)) {
       await twilioClient.messages.create({
         from: to,
         to: from,
@@ -271,10 +282,11 @@ app.post("/whatsapp", async (req, res) => {
       });
     }
 
-    return res.status(200).send("OK");
+    return res.status(200).type("text/plain").send("OK");
   } catch (e) {
-    console.error("❌ Webhook error:", e.message);
-    return res.status(500).send("ERROR");
+    console.error("❌ Webhook error:", e);
+    // PATCH: nunca 500 al caller; respondemos 200 para que Twilio no reintente en loop
+    return res.status(200).type("text/plain").send("OK");
   }
 });
 
@@ -324,6 +336,7 @@ app.get("/appointments", async (_req, res) => {
 });
 
 // === START ===
-app.listen(PORT, () => {
+// PATCH: Render suele inyectar PORT; escucha en 0.0.0.0
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
