@@ -24,16 +24,18 @@ const twilioClient =
     ? new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     : null;
 
+// === ESTADO EN MEMORIA (prototipo) ===
+const sessions = new Map(); // key: phone, value: {ref, service, date, time, price, name}
+
 // === HELPERS ===
+const pad2 = (n) => n.toString().padStart(2, "0");
 function genRef() {
   const n = Math.floor(1000 + Math.random() * 9000);
   return `ACT-${n}`;
 }
-const pad2 = (n) => n.toString().padStart(2, "0");
-
 function normalizarFecha(token) {
-  const ymd = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/;     // 2025-10-31
-  const dm = /^(\d{1,2})[\/-](\d{1,2})$/;                // 31/10 o 31-10
+  const ymd = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/; // 2025-10-31
+  const dm = /^(\d{1,2})[\/-](\d{1,2})$/; // 31/10
   if (ymd.test(token)) {
     const [, y, m, d] = token.match(ymd);
     return `${y}-${pad2(m)}-${pad2(d)}`;
@@ -46,7 +48,6 @@ function normalizarFecha(token) {
   }
   return null;
 }
-
 function parsear(texto) {
   let rest = (texto || "").trim();
 
@@ -81,14 +82,14 @@ function parsear(texto) {
     rest = rest.replace(new RegExp(`${last}\\b`), " ").trim();
   }
 
-  // servicio = lo que quede
+  // servicio
   let servicio = rest.replace(/\s{2,}/g, " ").trim();
   if (!servicio) servicio = "Pendiente";
 
   // defaults
   if (!fecha) {
     const now = new Date();
-    fecha = `${now.getUTCFullYear()}-${pad2(now.getUTCMonth() + 1)}-${pad2(now.getUTCDate())}`;
+    fecha = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
   }
   if (!hora) hora = "12:00";
   if (precio == null || Number.isNaN(precio)) precio = 0;
@@ -110,7 +111,6 @@ async function sbInsert(payload) {
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   return res.json();
 }
-
 async function sbSelect(limit = 10) {
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/appointments?select=*&order=created_at.desc&limit=${limit}`,
@@ -125,48 +125,154 @@ async function sbSelect(limit = 10) {
   return res.json();
 }
 
+function firstName(profileName) {
+  if (!profileName) return "Cliente";
+  return profileName.toString().split(" ")[0];
+}
+function menuTexto(nombre = "Cliente") {
+  return (
+    `Hola ${nombre} 👋\n` +
+    `Elige tu servicio:\n` +
+    `1) Corte\n` +
+    `2) Barba\n` +
+    `3) Facial\n\n` +
+    `O mándame en una línea: Ej.\n` +
+    `Barba 31/10 12:30 90`
+  );
+}
+function resumen(row) {
+  return (
+    `Ref ${row.ref}\n` +
+    `Servicio: ${row.service}\n` +
+    `Fecha: ${row.date} ${row.time}\n` +
+    `Precio: $${row.price}`
+  );
+}
+
 // === HEALTH ===
 app.get("/", (_req, res) => res.send("AutoCitaMX up ✅"));
 app.get("/whatsapp", (_req, res) => res.send("WhatsApp webhook up ✅"));
 
 // === WEBHOOK WHATSAPP ===
 app.post("/whatsapp", async (req, res) => {
+  const from = req.body.From || "";
+  const to = req.body.To || "";
+  const body = (req.body.Body || "").trim();
+  const nombre = firstName(req.body.ProfileName);
+
   try {
-    const from = req.body.From || "";
-    const body = (req.body.Body || "").trim();
-    const { servicio, fecha, hora, precio } = parsear(body);
-    const ref = genRef();
+    const lower = body.toLowerCase();
 
-    const row = {
-      ref,
-      phone: from,
-      service: servicio,
-      date: fecha,
-      time: hora,
-      price: precio,
-      status: "pendiente",
-    };
-
-    await sbInsert(row);
-
-    // Respuesta (si sandbox lo permite). Comenta este bloque si no quieres gastar cuota:
-    if (twilioClient && from) {
-      try {
+    // 0) Comandos cortos
+    if (["hola", "menu", "menú", "inicio", "start"].includes(lower)) {
+      if (twilioClient) {
         await twilioClient.messages.create({
-          from: req.body.To,
+          from: to,
           to: from,
-          body:
-            `✅ Guardado. Ref ${ref}\n` +
-            `Servicio: ${row.service}\n` +
-            `Fecha: ${row.date} ${row.time}\n` +
-            `Precio: $${row.price}`,
+          body: menuTexto(nombre),
         });
-      } catch (e) {
-        console.warn("⚠️ Respuesta omitida:", e.message);
       }
+      return res.status(200).send("OK");
     }
 
-    res.status(200).send("OK");
+    // 1) Confirmación SI/NO si existe sesión
+    if (sessions.has(from)) {
+      if (["si", "sí", "si.", "sí.", "confirmo"].includes(lower)) {
+        const s = sessions.get(from);
+        const row = {
+          ref: s.ref,
+          phone: from,
+          service: s.service,
+          date: s.date,
+          time: s.time,
+          price: s.price,
+          status: "confirmada",
+        };
+        await sbInsert(row);
+        sessions.delete(from);
+
+        if (twilioClient) {
+          await twilioClient.messages.create({
+            from: to,
+            to: from,
+            body: `✅ Confirmado.\n${resumen(row)}`,
+          });
+        }
+        return res.status(200).send("OK");
+      }
+      if (["no", "no.", "cancelar", "cambiar"].includes(lower)) {
+        sessions.delete(from);
+        if (twilioClient) {
+          await twilioClient.messages.create({
+            from: to,
+            to: from,
+            body: `Sin problema, ${nombre}. ${menuTexto(nombre)}`,
+          });
+        }
+        return res.status(200).send("OK");
+      }
+      // Si escribe otra cosa con sesión activa, vuelve a mostrar resumen
+      const s = sessions.get(from);
+      if (twilioClient) {
+        await twilioClient.messages.create({
+          from: to,
+          to: from,
+          body: `¿Confirmas esta cita? Responde SI o NO.\n${resumen(s)}`,
+        });
+      }
+      return res.status(200).send("OK");
+    }
+
+    // 2) Menú numérico simple
+    if (["1", "2", "3"].includes(lower)) {
+      const servicios = { "1": "Corte", "2": "Barba", "3": "Facial" };
+      const ref = genRef();
+      const { fecha, hora } = parsear(""); // defaults (hoy y 12:00)
+      const s = {
+        ref,
+        service: servicios[lower],
+        date: fecha,
+        time: hora,
+        price: 0,
+      };
+      sessions.set(from, s);
+      if (twilioClient) {
+        await twilioClient.messages.create({
+          from: to,
+          to: from,
+          body:
+            `Perfecto: ${s.service}\n` +
+            `Propuesta: ${s.date} ${s.time} $${s.price}\n` +
+            `¿Confirmas? Responde **SI** o **NO**.\n` +
+            `También puedes mandar: "Barba 31/10 12:30 90"`,
+        });
+      }
+      return res.status(200).send("OK");
+    }
+
+    // 3) Parseo libre
+    const parsed = parsear(body);
+    const ref = genRef();
+    const s = {
+      ref,
+      service: parsed.servicio,
+      date: parsed.fecha,
+      time: parsed.hora,
+      price: parsed.precio,
+    };
+    sessions.set(from, s);
+
+    if (twilioClient) {
+      await twilioClient.messages.create({
+        from: to,
+        to: from,
+        body:
+          `¿Confirmas esta cita, ${nombre}? Responde SI o NO.\n` +
+          `${resumen(s)}`,
+      });
+    }
+
+    return res.status(200).send("OK");
   } catch (e) {
     console.error("❌ Webhook error:", e.message);
     res.status(500).send("ERROR");
@@ -177,19 +283,28 @@ app.post("/whatsapp", async (req, res) => {
 app.get("/parse-test", (req, res) => {
   const text = (req.query.text || "").toString();
   if (!text) return res.json({ ok: false, error: "text vacío" });
-  return res.json({ ok: true, parsed: parsear(text) });
+  const p = parsear(text);
+  res.json({
+    ok: true,
+    parsed: {
+      servicio: p.servicio,
+      fecha: p.fecha,
+      hora: p.hora,
+      precio: p.precio,
+    },
+  });
 });
-
 app.get("/test/insert", async (_req, res) => {
   try {
-    const { servicio, fecha, hora, precio } = parsear("Test 12:00 0");
+    const ref = genRef();
+    const p = parsear("Test 12:00 0");
     const row = {
-      ref: genRef(),
+      ref,
       phone: "whatsapp:+5210000000000",
-      service: servicio,
-      date: fecha,
-      time: hora,
-      price: precio,
+      service: p.servicio,
+      date: p.fecha,
+      time: p.hora,
+      price: p.precio,
       status: "confirmada",
     };
     const inserted = await sbInsert(row);
@@ -198,7 +313,6 @@ app.get("/test/insert", async (_req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
-
 app.get("/appointments", async (_req, res) => {
   try {
     const rows = await sbSelect(10);
@@ -206,6 +320,11 @@ app.get("/appointments", async (_req, res) => {
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
+});
+
+// === START ===
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+
 });
 
 // === START ===
