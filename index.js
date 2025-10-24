@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 
-// === SUPABASE ===
+// === SUPABASE (tus datos) ===
 const SUPABASE_URL = "https://qffstwhizihtexfompwe.supabase.co";
 const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFmZnN0d2hpemlodGV4Zm9tcHdlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEyNDE1NzcsImV4cCI6MjA3NjgxNzU3N30.RyY1ZLHxOfXoO_oVzNai4CMZuvMQUSKRGKT4YcCpesA";
@@ -29,8 +29,77 @@ function genRef() {
   const n = Math.floor(1000 + Math.random() * 9000);
   return `ACT-${n}`;
 }
-function todayISO() {
-  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+function pad2(n) {
+  return n.toString().padStart(2, "0");
+}
+
+function normalizeDateToken(token) {
+  // acepta 31/10, 31-10, 2025-10-31
+  const dashISO = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/;
+  const dm = /^(\d{1,2})[\/-](\d{1,2})$/;
+  if (dashISO.test(token)) {
+    const [, y, m, d] = token.match(dashISO);
+    return `${y}-${pad2(m)}-${pad2(d)}`;
+  }
+  if (dm.test(token)) {
+    const now = new Date();
+    const year = now.getUTCFullYear();
+    const [, d, m] = token.match(dm);
+    return `${year}-${pad2(m)}-${pad2(d)}`;
+  }
+  return null;
+}
+
+function extractDateTimePrice(text) {
+  let remaining = text;
+
+  // time HH:MM (24h)
+  let time = null;
+  const timeRe = /\b([01]?\d|2[0-3]):([0-5]\d)\b/;
+  const timeMatch = remaining.match(timeRe);
+  if (timeMatch) {
+    time = `${pad2(timeMatch[1])}:${timeMatch[2]}`;
+    remaining = remaining.replace(timeMatch[0], " ").trim();
+  }
+
+  // date
+  let date = null;
+  const tokens = remaining.split(/\s+/);
+  for (const t of tokens) {
+    const norm = normalizeDateToken(t);
+    if (norm) {
+      date = norm;
+      remaining = remaining.replace(t, " ").trim();
+      break;
+    }
+  }
+
+  // price (último número con posible $ o decimales)
+  let price = null;
+  const priceRe = /(?:\$?\s*)(\d+(?:[.,]\d{1,2})?)(?!\S)/g;
+  let m, lastNum = null;
+  while ((m = priceRe.exec(remaining)) !== null) {
+    lastNum = m[1];
+  }
+  if (lastNum) {
+    price = parseFloat(lastNum.replace(",", "."));
+    remaining = remaining.replace(new RegExp(lastNum + "\\b"), " ").trim();
+  }
+
+  // service = lo que quede (limpio)
+  let service = remaining.replace(/\s{2,}/g, " ").trim();
+  if (!service) service = "Pendiente";
+
+  // defaults si faltan
+  if (!date) {
+    const now = new Date();
+    date = `${now.getUTCFullYear()}-${pad2(now.getUTCMonth() + 1)}-${pad2(now.getUTCDate())}`;
+  }
+  if (!time) time = "12:00";
+  if (price == null || Number.isNaN(price)) price = 0;
+
+  return { service, date, time, price };
 }
 
 async function sbInsert(payload) {
@@ -66,33 +135,38 @@ async function sbSelect(limit = 10) {
 app.get("/", (_req, res) => res.send("AutoCitaMX up ✅"));
 app.get("/whatsapp", (_req, res) => res.send("WhatsApp webhook up ✅"));
 
-// === WEBHOOK WHATSAPP ===
+// === WEBHOOK WHATSAPP (parsea y guarda) ===
 app.post("/whatsapp", async (req, res) => {
   try {
     const from = req.body.From || "";
     const body = (req.body.Body || "").trim();
-    const service = body || "Pendiente";
     const ref = genRef();
 
-    // Inserta SOLO columnas que existen en tu tabla:
+    const parsed = extractDateTimePrice(body);
     const row = {
-      ref,                     // ej: ACT-1234
-      phone: from,             // 'whatsapp:+52...'
-      service,                 // texto
-      date: todayISO(),        // <-- requerido por tu NOT NULL
-      time: "00:00",           // por defecto
-      price: 0,                // por defecto
-      status: "confirmada"     // usa uno válido en tu tabla
+      ref,
+      phone: from,
+      service: parsed.service,
+      date: parsed.date,
+      time: parsed.time,
+      price: parsed.price,
+      status: "pendiente",
     };
 
     await sbInsert(row);
 
+    // Respuesta (si el sandbox permite)
     if (twilioClient && from) {
+      const reply =
+        `✅ Guardado. Ref ${ref}\n` +
+        `Servicio: ${row.service}\n` +
+        `Fecha: ${row.date} ${row.time}\n` +
+        `Precio: $${row.price}`;
       try {
         await twilioClient.messages.create({
           from: req.body.To,
           to: from,
-          body: `¡Recibido! Ref ${ref}. Servicio: "${service}". Te confirmamos en breve ✅`,
+          body: reply,
         });
       } catch (e) {
         console.warn("⚠️ Respuesta omitida:", e.message);
@@ -106,17 +180,17 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// === TEST SIN WHATSAPP ===
+// === TESTS SIN WHATSAPP ===
 app.get("/test/insert", async (_req, res) => {
   try {
     const row = {
       ref: genRef(),
       phone: "whatsapp:+5210000000000",
       service: "Test",
-      date: todayISO(),  // <-- requerido
-      time: "12:00",     // default
-      price: 0,          // default
-      status: "confirmada"
+      date: new Date().toISOString().slice(0, 10),
+      time: "12:00",
+      price: 0,
+      status: "confirmada",
     };
     const inserted = await sbInsert(row);
     res.json({ ok: true, inserted });
@@ -134,6 +208,12 @@ app.get("/appointments", async (_req, res) => {
   }
 });
 
+// Endpoint para probar el parser sin tocar BD: /parse-test?text=Barba%2031/10%2012:30%2090
+app.get("/parse-test", (req, res) => {
+  const text = (req.query.text || "").toString();
+  if (!text) return res.json({ ok: false, error: "text vacío" });
+  return res.json({ ok: true, parsed: extractDateTimePrice(text) });
+});
+
 // === START ===
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
-
