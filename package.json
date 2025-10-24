@@ -2,6 +2,7 @@
   "name": "autocitamx",
   "version": "1.0.0",
   "type": "module",
+  "engines": { "node": ">=18" },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
     "body-parser": "^1.20.2",
