@@ -9,23 +9,26 @@ const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// ====== CONFIG ======
+// === ENV ===
 const PORT = process.env.PORT || 3000;
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 
-// ⚠️ Tus datos de Supabase (los que me pasaste)
+// <<< PON AQUÍ TUS DATOS DE SUPABASE >>>
 const SUPABASE_URL = "https://qffstwhizihtexfompwe.supabase.co";
-const SUPABASE_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFmZnN0d2hpemlodGV4Zm9tcHdlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEyNDE1NzcsImV4cCI6MjA3NjgxNzU3N30.RyY1ZLHxOfXoO_oVzNai4CMZuvMQUSKRGKT4YcCpesA";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFmZnN0d2hpemlodGV4Zm9tcHdlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEyNDE1NzcsImV4cCI6MjA3NjgxNzU3N30.RyY1ZLHxOfXoO_oVzNai4CMZuvMQUSKRGKT4YcCpesA";
 
 const twilioClient =
   TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
     ? new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     : null;
 
-// ====== HELPERS ======
-async function supabaseInsertAppointments(payload) {
+// === HELPERS ===
+function genRef() {
+  const n = Math.floor(1000 + Math.random() * 9000);
+  return `ACT-${n}`;
+}
+async function sbInsert(payload) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/appointments`, {
     method: "POST",
     headers: {
@@ -39,8 +42,7 @@ async function supabaseInsertAppointments(payload) {
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   return res.json();
 }
-
-async function supabaseSelectAppointments(limit = 10) {
+async function sbSelect(limit = 10) {
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/appointments?select=*&order=created_at.desc&limit=${limit}`,
     {
@@ -54,83 +56,77 @@ async function supabaseSelectAppointments(limit = 10) {
   return res.json();
 }
 
-// ====== RUTAS ======
+// === RUTAS HEALTH ===
 app.get("/", (_req, res) => res.send("AutoCitaMX up ✅"));
 app.get("/whatsapp", (_req, res) => res.send("WhatsApp webhook up ✅"));
 
-// Webhook real para Twilio (POST)
+// === WEBHOOK WHATSAPP (usa TU esquema real: id, ref, phone, service, date, time, price, status, created_at) ===
 app.post("/whatsapp", async (req, res) => {
   try {
-    console.log("Inbound WhatsApp:", req.body);
-
     const from = req.body.From || "";
-    const body = req.body.Body || "";
-    const profile = req.body.ProfileName || "Cliente";
+    const body = (req.body.Body || "").trim();
+    const service = body || "Pendiente";
+    const ref = genRef();
 
-    const cita = {
-      customer_name: profile,
-      phone: from,
-      service_name: "Pendiente",
-      requested_slot_text: body,
-      status: "pending",
-      payment_status: "unpaid",
+    // Inserta SOLO las columnas que existen en tu tabla actual
+    const row = {
+      ref,                // ej: ACT-1234
+      phone: from,        // 'whatsapp:+52...'
+      service,            // texto libre por ahora
+      status: "recibida", // usa alguno de tus estados válidos
+      // date, time, price: los dejamos nulos si no los tienes aún
     };
+    await sbInsert(row);
 
-    await supabaseInsertAppointments(cita);
-
-    // Responder (puede fallar si el sandbox alcanzó el límite)
-    if (twilioClient && from && body) {
+    // Respuesta (si el sandbox deja)
+    if (twilioClient && from) {
       try {
         await twilioClient.messages.create({
           from: req.body.To,
           to: from,
-          body: `Gracias ${profile}! Guardé tu solicitud: "${body}". Te confirmaremos pronto ✅`,
+          body: `¡Recibido! Ref ${ref}. Servicio: "${service}". Te confirmamos en breve ✅`,
         });
       } catch (e) {
-        console.warn("⚠️ Respuesta Twilio omitida:", e.message);
+        console.warn("⚠️ Respuesta omitida:", e.message);
       }
     }
 
     res.status(200).send("OK");
   } catch (e) {
-    console.error("❌ Error en webhook:", e.message);
+    console.error("❌ Webhook error:", e.message);
     res.status(500).send("ERROR");
   }
 });
 
-/**
- * 🔎 Verificación SIN WhatsApp:
- * 1) Inserta una cita de prueba → GET /test/insert
- * 2) Lista últimas 10 citas → GET /appointments
- */
-
-// Inserta una cita de prueba rápida
+// === TEST SIN WHATSAPP ===
 app.get("/test/insert", async (_req, res) => {
   try {
-    const now = new Date().toISOString();
-    const payload = {
-      customer_name: "Prueba",
+    const row = {
+      ref: genRef(),
       phone: "whatsapp:+5210000000000",
-      service_name: "Test",
-      requested_slot_text: `test ${now}`,
-      status: "pending",
-      payment_status: "unpaid",
+      service: "Test",
+      status: "prueba",
+      // date/time/price opcionales según tu schema
     };
-    const inserted = await supabaseInsertAppointments(payload);
+    const inserted = await sbInsert(row);
     res.json({ ok: true, inserted });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-// Lista últimas 10 citas
 app.get("/appointments", async (_req, res) => {
   try {
-    const rows = await supabaseSelectAppointments(10);
+    const rows = await sbSelect(10);
     res.json(rows);
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
+});
+
+// === START ===
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+
 });
 
 // ====== START ======
