@@ -10,10 +10,10 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 // === ENV ===
-const PORT = process.env.PORT || 3000;
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const TWILIO_WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || "";
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
+const TWILIO_WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || ""; // ej: "whatsapp:+52XXXXXXXXXX"
+const ENABLE_OUTBOUND = (process.env.ENABLE_OUTBOUND || "true") === "true";
 
 const twilioClient =
   TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
@@ -21,15 +21,24 @@ const twilioClient =
     : null;
 
 // === ESTADO EN MEMORIA (prototipo) ===
-const sessions = new Map();
+const sessions = new Map(); // key: phone, value: {ref, service, date, time, price}
+const processedSids = new Set(); // idempotencia por mensaje entrante
+
+function alreadyProcessed(sid) {
+  if (!sid) return false;
+  if (processedSids.has(sid)) return true;
+  processedSids.add(sid);
+  if (processedSids.size > 5000) processedSids.clear(); // limpieza simple
+  return false;
+}
 
 // === HELPERS ===
 const pad2 = (n) => n.toString().padStart(2, "0");
 const genRef = () => `ACT-${Math.floor(1000 + Math.random() * 9000)}`;
 
 function normalizarFecha(token) {
-  const ymd = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/;
-  const dm = /^(\d{1,2})[\/-](\d{1,2})$/;
+  const ymd = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/; // 2025-10-31
+  const dm = /^(\d{1,2})[\/-](\d{1,2})$/; // 31/10
   if (ymd.test(token)) {
     const [, y, m, d] = token.match(ymd);
     return `${y}-${pad2(m)}-${pad2(d)}`;
@@ -45,6 +54,8 @@ function normalizarFecha(token) {
 
 function parsear(texto) {
   let rest = (texto || "").trim();
+
+  // hora HH:MM
   let hora = null;
   const reHora = /\b([01]?\d|2[0-3]):([0-5]\d)\b/;
   const mh = rest.match(reHora);
@@ -52,6 +63,8 @@ function parsear(texto) {
     hora = `${pad2(mh[1])}:${mh[2]}`;
     rest = rest.replace(mh[0], " ").trim();
   }
+
+  // fecha
   let fecha = null;
   const tokens = rest.split(/\s+/);
   for (const t of tokens) {
@@ -62,21 +75,32 @@ function parsear(texto) {
       break;
     }
   }
+
+  // precio (último número)
   let precio = null;
   const rePrecio = /(?:\$?\s*)(\d+(?:[.,]\d{1,2})?)(?!\S)/g;
-  let m, last = null;
+  let m,
+    last = null;
   while ((m = rePrecio.exec(rest)) !== null) last = m[1];
   if (last) {
     precio = parseFloat(last.replace(",", "."));
     rest = rest.replace(new RegExp(`${last}\\b`), " ").trim();
   }
-  let servicio = rest.replace(/\s{2,}/g, " ").trim() || "Pendiente";
+
+  // servicio
+  let servicio = rest.replace(/\s{2,}/g, " ").trim();
+  if (!servicio) servicio = "Pendiente";
+
+  // defaults
   if (!fecha) {
     const now = new Date();
-    fecha = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+    fecha = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(
+      now.getDate()
+    )}`;
   }
   if (!hora) hora = "12:00";
   if (precio == null || Number.isNaN(precio)) precio = 0;
+
   return { servicio, fecha, hora, precio };
 }
 
@@ -113,22 +137,35 @@ async function sbSelect(limit = 10) {
   return res.json();
 }
 
-function firstName(profileName) {
-  if (!profileName) return "Cliente";
-  return profileName.toString().split(" ")[0];
-}
-function menuTexto(nombre = "Cliente") {
-  return `Hola ${nombre} 👋\nElige tu servicio:\n1) Corte\n2) Barba\n3) Facial\n\nO mándame en una línea: Ej.\nBarba 31/10 12:30 90`;
-}
-function resumen(row) {
-  return `Ref ${row.ref}\nServicio: ${row.service}\nFecha: ${row.date} ${row.time}\nPrecio: $${row.price}`;
-}
+// === TEXTOS ===
+const firstName = (profileName) =>
+  profileName ? profileName.toString().split(" ")[0] : "Cliente";
+
+const menuTexto = (nombre = "Cliente") =>
+  `Hola ${nombre} 👋
+Elige tu servicio:
+1) Corte
+2) Barba
+3) Facial
+
+O mándame en una línea: Ej.
+Barba 31/10 12:30 90`;
+
+const resumen = (row) =>
+  `Ref ${row.ref}
+Servicio: ${row.service}
+Fecha: ${row.date} ${row.time}
+Precio: $${row.price}`;
 
 // === SAFE TWILIO SEND ===
 async function safeWhatsAppSend({ from, to, body }) {
+  if (!ENABLE_OUTBOUND) {
+    console.log("🔕 Envío deshabilitado (ENABLE_OUTBOUND=false). Solo log.");
+    return { ok: false, skipped: true, reason: "outbound-disabled" };
+  }
   if (!twilioClient || !/^whatsapp:\+/.test(from) || !/^whatsapp:\+/.test(to)) {
     console.log("⚠️ No hay cliente Twilio o número inválido, se omite envío.");
-    return { ok: false, skipped: true };
+    return { ok: false, skipped: true, reason: "no-client-or-address" };
   }
   try {
     const msg = await twilioClient.messages.create({ from, to, body });
@@ -144,25 +181,37 @@ async function safeWhatsAppSend({ from, to, body }) {
   }
 }
 
-// === ROUTES ===
+// === HEALTH ===
 app.get("/", (_req, res) => res.send("AutoCitaMX up ✅"));
 app.get("/whatsapp", (_req, res) => res.send("WhatsApp webhook up ✅"));
 
+// === WEBHOOK WHATSAPP ===
 app.post("/whatsapp", async (req, res) => {
   const from = req.body.From || req.body.from || "";
   let to = req.body.To || req.body.to || "";
   const body = (req.body.Body || req.body.body || "").trim();
   const nombre = firstName(req.body.ProfileName);
+  const msgSid = req.body.MessageSid || req.body.SmsMessageSid;
+
+  // Idempotencia: no procesar dos veces el mismo mensaje
+  if (alreadyProcessed(msgSid)) {
+    console.log("♻️ Duplicado ignorado:", msgSid);
+    return res.status(200).send("OK");
+  }
+
+  // Fallback opcional para pruebas manuales
   if (!to && TWILIO_WHATSAPP_FROM) to = TWILIO_WHATSAPP_FROM;
 
   try {
     const lower = body.toLowerCase();
 
+    // 0) Comandos cortos
     if (["hola", "menu", "menú", "inicio", "start"].includes(lower)) {
       await safeWhatsAppSend({ from: to, to: from, body: menuTexto(nombre) });
       return res.status(200).send("OK");
     }
 
+    // 1) Confirmación SI/NO si existe sesión
     if (sessions.has(from)) {
       if (["si", "sí", "si.", "sí.", "confirmo"].includes(lower)) {
         const s = sessions.get(from);
@@ -177,49 +226,120 @@ app.post("/whatsapp", async (req, res) => {
         };
         await sbInsert(row);
         sessions.delete(from);
-        await safeWhatsAppSend({ from: to, to: from, body: `✅ Confirmado.\n${resumen(row)}` });
+
+        await safeWhatsAppSend({
+          from: to,
+          to: from,
+          body: `✅ Confirmado.\n${resumen(row)}`,
+        });
         return res.status(200).send("OK");
       }
+
       if (["no", "no.", "cancelar", "cambiar"].includes(lower)) {
         sessions.delete(from);
-        await safeWhatsAppSend({ from: to, to: from, body: `Sin problema, ${nombre}. ${menuTexto(nombre)}` });
+        await safeWhatsAppSend({
+          from: to,
+          to: from,
+          body: `Sin problema, ${nombre}. ${menuTexto(nombre)}`,
+        });
         return res.status(200).send("OK");
       }
-      const s = sessions.get(from);
-      await safeWhatsAppSend({ from: to, to: from, body: `¿Confirmas esta cita? Responde SI o NO.\n${resumen(s)}` });
-      return res.status(200).send("OK");
-    }
 
-    if (["1", "2", "3"].includes(lower)) {
-      const servicios = { "1": "Corte", "2": "Barba", "3": "Facial" };
-      const ref = genRef();
-      const { fecha, hora } = parsear("");
-      const s = { ref, service: servicios[lower], date: fecha, time: hora, price: 0 };
-      sessions.set(from, s);
+      const s = sessions.get(from);
       await safeWhatsAppSend({
         from: to,
         to: from,
-        body: `Perfecto: ${s.service}\nPropuesta: ${s.date} ${s.time} $${s.price}\n¿Confirmas? Responde **SI** o **NO**.\nTambién puedes mandar: "Barba 31/10 12:30 90"`,
+        body: `¿Confirmas esta cita? Responde SI o NO.\n${resumen(s)}`,
       });
       return res.status(200).send("OK");
     }
 
+    // 2) Menú numérico simple
+    if (["1", "2", "3"].includes(lower)) {
+      const servicios = { "1": "Corte", "2": "Barba", "3": "Facial" };
+      const ref = genRef();
+      const { fecha, hora } = parsear(""); // defaults
+      const s = { ref, service: servicios[lower], date: fecha, time: hora, price: 0 };
+      sessions.set(from, s);
+
+      await safeWhatsAppSend({
+        from: to,
+        to: from,
+        body:
+          `Perfecto: ${s.service}\n` +
+          `Propuesta: ${s.date} ${s.time} $${s.price}\n` +
+          `¿Confirmas? Responde **SI** o **NO**.\n` +
+          `También puedes mandar: "Barba 31/10 12:30 90"`,
+      });
+      return res.status(200).send("OK");
+    }
+
+    // 3) Parseo libre
     const parsed = parsear(body);
     const ref = genRef();
     const s = { ref, service: parsed.servicio, date: parsed.fecha, time: parsed.hora, price: parsed.precio };
     sessions.set(from, s);
-    await safeWhatsAppSend({ from: to, to: from, body: `¿Confirmas esta cita, ${nombre}? Responde SI o NO.\n${resumen(s)}` });
+
+    await safeWhatsAppSend({
+      from: to,
+      to: from,
+      body: `¿Confirmas esta cita, ${nombre}? Responde SI o NO.\n${resumen(s)}`,
+    });
+
     return res.status(200).send("OK");
   } catch (e) {
     console.error("❌ Webhook error:", e?.message || e);
-    return res.status(200).send("OK");
+    return res.status(200).send("OK"); // No reintentos en loop por parte de Twilio
+  }
+});
+
+// === TESTS ===
+app.get("/parse-test", (req, res) => {
+  const text = (req.query.text || "").toString();
+  if (!text) return res.json({ ok: false, error: "text vacío" });
+  const p = parsear(text);
+  res.json({
+    ok: true,
+    parsed: {
+      servicio: p.servicio,
+      fecha: p.fecha,
+      hora: p.hora,
+      precio: p.precio,
+    },
+  });
+});
+app.get("/test/insert", async (_req, res) => {
+  try {
+    const ref = genRef();
+    const p = parsear("Test 12:00 0");
+    const row = {
+      ref,
+      phone: "whatsapp:+5210000000000",
+      service: p.servicio,
+      date: p.fecha,
+      time: p.hora,
+      price: p.precio,
+      status: "confirmada",
+    };
+    const inserted = await sbInsert(row);
+    res.json({ ok: true, inserted });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+app.get("/appointments", async (_req, res) => {
+  try {
+    const rows = await sbSelect(10);
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
 // === START ===
-// Usar puerto dinámico de Render (NO fijar manualmente)
+// Puerto dinámico de Render
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`✅ Server running on port ${port}`);
+  console.log(`✅ Server running on port ${port} | outbound=${ENABLE_OUTBOUND}`);
 });
 
