@@ -340,9 +340,11 @@ app.get("/appointments", async (_req, res) => {
 });
 
 // === START ===
-app.listen(PORT, "0.0.0.0", () =>
-  console.log(`✅ Server running on port ${PORT}`)
-);
+// Usa el puerto dinámico de Render para evitar EADDRINUSE
+const port = process.env.PORT || PORT || 3000;
+app.listen(port, () => {
+  console.log(`✅ Server running on port ${port}`);
+});
 
 // PATCH: Render suele inyectar PORT; escucha en 0.0.0.0
 app.listen(PORT, "0.0.0.0", () => {
