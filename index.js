@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 
-// === SUPABASE ===
+// === SUPABASE (tus datos) ===
 const SUPABASE_URL = "https://qffstwhizihtexfompwe.supabase.co";
 const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFmZnN0d2hpemlodGV4Zm9tcHdlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEyNDE1NzcsImV4cCI6MjA3NjgxNzU3N30.RyY1ZLHxOfXoO_oVzNai4CMZuvMQUSKRGKT4YcCpesA";
@@ -25,14 +25,12 @@ const twilioClient =
     : null;
 
 // === ESTADO EN MEMORIA (prototipo) ===
-const sessions = new Map(); // key: phone, value: {ref, service, date, time, price, name}
+const sessions = new Map(); // key: phone
 
 // === HELPERS ===
 const pad2 = (n) => n.toString().padStart(2, "0");
-function genRef() {
-  const n = Math.floor(1000 + Math.random() * 9000);
-  return `ACT-${n}`;
-}
+const genRef = () => `ACT-${Math.floor(1000 + Math.random() * 9000)}`;
+
 function normalizarFecha(token) {
   const ymd = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/; // 2025-10-31
   const dm = /^(\d{1,2})[\/-](\d{1,2})$/; // 31/10
@@ -42,12 +40,13 @@ function normalizarFecha(token) {
   }
   if (dm.test(token)) {
     const now = new Date();
-    const y = now.getUTCFullYear();
+    const y = now.getFullYear();
     const [, d, m] = token.match(dm);
     return `${y}-${pad2(m)}-${pad2(d)}`;
   }
   return null;
 }
+
 function parsear(texto) {
   let rest = (texto || "").trim();
 
@@ -62,7 +61,7 @@ function parsear(texto) {
 
   // fecha
   let fecha = null;
-  const tokens = rest.split(/\s+/);
+  const tokens = rest.split(/\s+/).filter(Boolean);
   for (const t of tokens) {
     const f = normalizarFecha(t);
     if (f) {
@@ -75,21 +74,24 @@ function parsear(texto) {
   // precio (último número)
   let precio = null;
   const rePrecio = /(?:\$?\s*)(\d+(?:[.,]\d{1,2})?)(?!\S)/g;
-  let m, last = null;
+  let m;
+  let last = null;
   while ((m = rePrecio.exec(rest)) !== null) last = m[1];
   if (last) {
     precio = parseFloat(last.replace(",", "."));
     rest = rest.replace(new RegExp(`${last}\\b`), " ").trim();
   }
 
-  // servicio
+  // servicio = lo que quede
   let servicio = rest.replace(/\s{2,}/g, " ").trim();
   if (!servicio) servicio = "Pendiente";
 
   // defaults
   if (!fecha) {
     const now = new Date();
-    fecha = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+    fecha = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(
+      now.getDate()
+    )}`;
   }
   if (!hora) hora = "12:00";
   if (precio == null || Number.isNaN(precio)) precio = 0;
@@ -111,6 +113,7 @@ async function sbInsert(payload) {
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   return res.json();
 }
+
 async function sbSelect(limit = 10) {
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/appointments?select=*&order=created_at.desc&limit=${limit}`,
@@ -125,29 +128,24 @@ async function sbSelect(limit = 10) {
   return res.json();
 }
 
-function firstName(profileName) {
-  if (!profileName) return "Cliente";
-  return profileName.toString().split(" ")[0];
-}
-function menuTexto(nombre = "Cliente") {
-  return (
-    `Hola ${nombre} 👋\n` +
-    `Elige tu servicio:\n` +
-    `1) Corte\n` +
-    `2) Barba\n` +
-    `3) Facial\n\n` +
-    `O mándame en una línea: Ej.\n` +
-    `Barba 31/10 12:30 90`
-  );
-}
-function resumen(row) {
-  return (
-    `Ref ${row.ref}\n` +
-    `Servicio: ${row.service}\n` +
-    `Fecha: ${row.date} ${row.time}\n` +
-    `Precio: $${row.price}`
-  );
-}
+const firstName = (n) =>
+  n ? n.toString().trim().split(/\s+/)[0] : "Cliente";
+
+const menuTexto = (nombre = "Cliente") =>
+  `Hola ${nombre} 👋
+Elige tu servicio:
+1) Corte
+2) Barba
+3) Facial
+
+O mándame en una línea: Ej.
+Barba 31/10 12:30 90`;
+
+const resumen = (row) =>
+  `Ref ${row.ref}
+Servicio: ${row.service}
+Fecha: ${row.date} ${row.time}
+Precio: $${row.price}`;
 
 // === HEALTH ===
 app.get("/", (_req, res) => res.send("AutoCitaMX up ✅"));
@@ -163,7 +161,7 @@ app.post("/whatsapp", async (req, res) => {
   try {
     const lower = body.toLowerCase();
 
-    // 0) Comandos cortos
+    // Comandos cortos
     if (["hola", "menu", "menú", "inicio", "start"].includes(lower)) {
       if (twilioClient) {
         await twilioClient.messages.create({
@@ -175,7 +173,7 @@ app.post("/whatsapp", async (req, res) => {
       return res.status(200).send("OK");
     }
 
-    // 1) Confirmación SI/NO si existe sesión
+    // Confirmación SI/NO con sesión
     if (sessions.has(from)) {
       if (["si", "sí", "si.", "sí.", "confirmo"].includes(lower)) {
         const s = sessions.get(from);
@@ -200,6 +198,7 @@ app.post("/whatsapp", async (req, res) => {
         }
         return res.status(200).send("OK");
       }
+
       if (["no", "no.", "cancelar", "cambiar"].includes(lower)) {
         sessions.delete(from);
         if (twilioClient) {
@@ -211,7 +210,8 @@ app.post("/whatsapp", async (req, res) => {
         }
         return res.status(200).send("OK");
       }
-      // Si escribe otra cosa con sesión activa, vuelve a mostrar resumen
+
+      // Cualquier otra cosa: re-enviar resumen
       const s = sessions.get(from);
       if (twilioClient) {
         await twilioClient.messages.create({
@@ -223,19 +223,20 @@ app.post("/whatsapp", async (req, res) => {
       return res.status(200).send("OK");
     }
 
-    // 2) Menú numérico simple
+    // Menú numérico
     if (["1", "2", "3"].includes(lower)) {
       const servicios = { "1": "Corte", "2": "Barba", "3": "Facial" };
       const ref = genRef();
-      const { fecha, hora } = parsear(""); // defaults (hoy y 12:00)
+      const p = parsear(""); // defaults
       const s = {
         ref,
         service: servicios[lower],
-        date: fecha,
-        time: hora,
+        date: p.fecha,
+        time: p.hora,
         price: 0,
       };
       sessions.set(from, s);
+
       if (twilioClient) {
         await twilioClient.messages.create({
           from: to,
@@ -243,22 +244,22 @@ app.post("/whatsapp", async (req, res) => {
           body:
             `Perfecto: ${s.service}\n` +
             `Propuesta: ${s.date} ${s.time} $${s.price}\n` +
-            `¿Confirmas? Responde **SI** o **NO**.\n` +
+            `¿Confirmas? Responde SI o NO.\n` +
             `También puedes mandar: "Barba 31/10 12:30 90"`,
         });
       }
       return res.status(200).send("OK");
     }
 
-    // 3) Parseo libre
-    const parsed = parsear(body);
+    // Parseo libre
+    const p = parsear(body);
     const ref = genRef();
     const s = {
       ref,
-      service: parsed.servicio,
-      date: parsed.fecha,
-      time: parsed.hora,
-      price: parsed.precio,
+      service: p.servicio,
+      date: p.fecha,
+      time: p.hora,
+      price: p.precio,
     };
     sessions.set(from, s);
 
@@ -266,16 +267,14 @@ app.post("/whatsapp", async (req, res) => {
       await twilioClient.messages.create({
         from: to,
         to: from,
-        body:
-          `¿Confirmas esta cita, ${nombre}? Responde SI o NO.\n` +
-          `${resumen(s)}`,
+        body: `¿Confirmas esta cita, ${nombre}? Responde SI o NO.\n${resumen(s)}`,
       });
     }
 
     return res.status(200).send("OK");
   } catch (e) {
     console.error("❌ Webhook error:", e.message);
-    res.status(500).send("ERROR");
+    return res.status(500).send("ERROR");
   }
 });
 
@@ -284,7 +283,7 @@ app.get("/parse-test", (req, res) => {
   const text = (req.query.text || "").toString();
   if (!text) return res.json({ ok: false, error: "text vacío" });
   const p = parsear(text);
-  res.json({
+  return res.json({
     ok: true,
     parsed: {
       servicio: p.servicio,
@@ -294,6 +293,7 @@ app.get("/parse-test", (req, res) => {
     },
   });
 });
+
 app.get("/test/insert", async (_req, res) => {
   try {
     const ref = genRef();
@@ -308,24 +308,22 @@ app.get("/test/insert", async (_req, res) => {
       status: "confirmada",
     };
     const inserted = await sbInsert(row);
-    res.json({ ok: true, inserted });
+    return res.json({ ok: true, inserted });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok: false, error: e.message });
   }
 });
+
 app.get("/appointments", async (_req, res) => {
   try {
     const rows = await sbSelect(10);
-    res.json(rows);
+    return res.json(rows);
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok: false, error: e.message });
   }
 });
 
 // === START ===
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
-
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
 });
-
-// === START ===
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
