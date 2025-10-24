@@ -14,9 +14,10 @@ const PORT = process.env.PORT || 3000;
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 
-// <<< PON AQUÍ TUS DATOS DE SUPABASE >>>
+// <<< SUPABASE TUS DATOS >>>
 const SUPABASE_URL = "https://qffstwhizihtexfompwe.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFmZnN0d2hpemlodGV4Zm9tcHdlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEyNDE1NzcsImV4cCI6MjA3NjgxNzU3N30.RyY1ZLHxOfXoO_oVzNai4CMZuvMQUSKRGKT4YcCpesA";
+const SUPABASE_ANON_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFmZnN0d2hpemlodGV4Zm9tcHdlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEyNDE1NzcsImV4cCI6MjA3NjgxNzU3N30.RyY1ZLHxOfXoO_oVzNai4CMZuvMQUSKRGKT4YcCpesA";
 
 const twilioClient =
   TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
@@ -28,6 +29,7 @@ function genRef() {
   const n = Math.floor(1000 + Math.random() * 9000);
   return `ACT-${n}`;
 }
+
 async function sbInsert(payload) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/appointments`, {
     method: "POST",
@@ -42,6 +44,7 @@ async function sbInsert(payload) {
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   return res.json();
 }
+
 async function sbSelect(limit = 10) {
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/appointments?select=*&order=created_at.desc&limit=${limit}`,
@@ -56,11 +59,11 @@ async function sbSelect(limit = 10) {
   return res.json();
 }
 
-// === RUTAS HEALTH ===
+// === HEALTH ===
 app.get("/", (_req, res) => res.send("AutoCitaMX up ✅"));
 app.get("/whatsapp", (_req, res) => res.send("WhatsApp webhook up ✅"));
 
-// === WEBHOOK WHATSAPP (usa TU esquema real: id, ref, phone, service, date, time, price, status, created_at) ===
+// === WEBHOOK WHATSAPP ===
 app.post("/whatsapp", async (req, res) => {
   try {
     const from = req.body.From || "";
@@ -68,17 +71,17 @@ app.post("/whatsapp", async (req, res) => {
     const service = body || "Pendiente";
     const ref = genRef();
 
-    // Inserta SOLO las columnas que existen en tu tabla actual
+    // Inserta SOLO columnas existentes en tu schema actual
     const row = {
-      ref,                // ej: ACT-1234
-      phone: from,        // 'whatsapp:+52...'
-      service,            // texto libre por ahora
-      status: "recibida", // usa alguno de tus estados válidos
-      // date, time, price: los dejamos nulos si no los tienes aún
+      ref,               // ej: ACT-1234
+      phone: from,       // 'whatsapp:+52...'
+      service,           // texto libre
+      status: "recibida" // usa estados válidos en tu tabla
+      // date/time/price opcionales si existen
     };
+
     await sbInsert(row);
 
-    // Respuesta (si el sandbox deja)
     if (twilioClient && from) {
       try {
         await twilioClient.messages.create({
@@ -105,8 +108,7 @@ app.get("/test/insert", async (_req, res) => {
       ref: genRef(),
       phone: "whatsapp:+5210000000000",
       service: "Test",
-      status: "prueba",
-      // date/time/price opcionales según tu schema
+      status: "prueba"
     };
     const inserted = await sbInsert(row);
     res.json({ ok: true, inserted });
@@ -125,9 +127,4 @@ app.get("/appointments", async (_req, res) => {
 });
 
 // === START ===
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
-
-});
-
-// ====== START ======
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
