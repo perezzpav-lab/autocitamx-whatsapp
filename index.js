@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 
-// <<< SUPABASE TUS DATOS >>>
+// === SUPABASE ===
 const SUPABASE_URL = "https://qffstwhizihtexfompwe.supabase.co";
 const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFmZnN0d2hpemlodGV4Zm9tcHdlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEyNDE1NzcsImV4cCI6MjA3NjgxNzU3N30.RyY1ZLHxOfXoO_oVzNai4CMZuvMQUSKRGKT4YcCpesA";
@@ -28,6 +28,9 @@ const twilioClient =
 function genRef() {
   const n = Math.floor(1000 + Math.random() * 9000);
   return `ACT-${n}`;
+}
+function todayISO() {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
 async function sbInsert(payload) {
@@ -71,13 +74,15 @@ app.post("/whatsapp", async (req, res) => {
     const service = body || "Pendiente";
     const ref = genRef();
 
-    // Inserta SOLO columnas existentes en tu schema actual
+    // Inserta SOLO columnas que existen en tu tabla:
     const row = {
-      ref,               // ej: ACT-1234
-      phone: from,       // 'whatsapp:+52...'
-      service,           // texto libre
-      status: "recibida" // usa estados válidos en tu tabla
-      // date/time/price opcionales si existen
+      ref,                     // ej: ACT-1234
+      phone: from,             // 'whatsapp:+52...'
+      service,                 // texto
+      date: todayISO(),        // <-- requerido por tu NOT NULL
+      time: "00:00",           // por defecto
+      price: 0,                // por defecto
+      status: "confirmada"     // usa uno válido en tu tabla
     };
 
     await sbInsert(row);
@@ -108,7 +113,10 @@ app.get("/test/insert", async (_req, res) => {
       ref: genRef(),
       phone: "whatsapp:+5210000000000",
       service: "Test",
-      status: "prueba"
+      date: todayISO(),  // <-- requerido
+      time: "12:00",     // default
+      price: 0,          // default
+      status: "confirmada"
     };
     const inserted = await sbInsert(row);
     res.json({ ok: true, inserted });
@@ -128,3 +136,4 @@ app.get("/appointments", async (_req, res) => {
 
 // === START ===
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+
