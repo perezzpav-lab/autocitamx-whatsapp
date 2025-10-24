@@ -6,54 +6,90 @@ import Twilio from "twilio";
 dotenv.config();
 
 const app = express();
-app.use(express.urlencoded({ extended: true })); // necesario para Twilio
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Variables de entorno (Render → Environment)
+// ====== CONFIGURACIÓN ======
 const PORT = process.env.PORT || 3000;
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const SUPABASE_URL = "https://qffstwhizihtexfompwe.supabase.co";
+const SUPABASE_ANON_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFmZnN0d2hpemlodGV4Zm9tcHdlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEyNDE1NzcsImV4cCI6MjA3NjgxNzU3N30.RyY1ZLHxOfXoO_oVzNai4CMZuvMQUSKRGKT4YcCpesA";
 
-// Validación para evitar crash si falta algo
-if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
-  console.warn("⚠️ Faltan credenciales de Twilio en Render Environment");
+const twilioClient = new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+
+// ====== FUNCIONES ======
+async function guardarCitaEnSupabase(data) {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/appointments`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify(data),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Supabase error: ${res.status} - ${errText}`);
+    }
+
+    const json = await res.json();
+    console.log("✅ Cita guardada en Supabase:", json);
+    return true;
+  } catch (err) {
+    console.error("❌ Error guardando cita:", err.message);
+    return false;
+  }
 }
 
-const twilioClient =
-  TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
-    ? new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    : null;
+// ====== RUTAS ======
+app.get("/", (_req, res) => res.send("AutoCitaMX up ✅"));
+app.get("/whatsapp", (_req, res) => res.send("WhatsApp webhook up ✅"));
 
-// Ruta principal (verificar que la app corre)
-app.get("/", (_req, res) => {
-  res.send("AutoCitaMX up ✅");
-});
-
-// Ruta de prueba (GET para navegador)
-app.get("/whatsapp", (_req, res) => {
-  res.send("WhatsApp webhook up ✅");
-});
-
-// Ruta real para Twilio (POST)
+// Webhook de WhatsApp (Twilio)
 app.post("/whatsapp", async (req, res) => {
   try {
     console.log("Inbound WhatsApp:", req.body);
 
-    // Si quieres responder por WhatsApp, ejemplo:
-    if (twilioClient && req.body.From && req.body.Body) {
+    const from = req.body.From || "";
+    const body = req.body.Body || "";
+    const profile = req.body.ProfileName || "Cliente";
+
+    // Crear cita básica
+    const cita = {
+      customer_name: profile,
+      phone: from,
+      service_name: "Pendiente",
+      requested_slot_text: body,
+      status: "pending",
+      payment_status: "unpaid",
+    };
+
+    await guardarCitaEnSupabase(cita);
+
+    // Enviar confirmación si no superas el límite del sandbox
+    try {
       await twilioClient.messages.create({
-        from: req.body.To, // tu número de Twilio
-        to: req.body.From, // el que escribió
-        body: `Hola ${req.body.From}, recibí tu mensaje: "${req.body.Body}" ✅`,
+        from: req.body.To,
+        to: from,
+        body: `Gracias ${profile}! Guardé tu solicitud: "${body}". Te confirmaremos tu cita pronto ✅`,
       });
+    } catch (twilioErr) {
+      console.warn("⚠️ No se pudo enviar mensaje (sandbox limit o error):", twilioErr.message);
     }
 
     res.status(200).send("OK");
-  } catch (err) {
-    console.error("❌ Error en webhook:", err.message);
+  } catch (e) {
+    console.error("❌ Error en webhook:", e.message);
     res.status(500).send("ERROR");
   }
 });
 
-// Iniciar servidor
+// ====== INICIAR SERVER ======
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+
