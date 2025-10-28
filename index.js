@@ -1,30 +1,18 @@
-// ===== AutoCitaMX — index.js (versión ES Modules compatible con Render) =====
+// ===== AutoCitaMX — index.js (Render, versión ES Modules Node 20) =====
 import express from "express";
 import bodyParser from "body-parser";
 
-// No uses require. Usa import siempre que veas "require('...')"
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
-app.use(bodyParser.json());
-// ===== AutoCitaMX — index.js (Render, Twilio WhatsApp + Supabase RPCs 'citas') =====
-// Node 18+ (fetch nativo). Si usas Node <=16, instala node-fetch y cámbialo.
-
-const express = require("express");
-const bodyParser = require("body-parser");
-
-const app = express();
-app.use(bodyParser.urlencoded({ extended: true })); // Twilio envía x-www-form-urlencoded
 app.use(bodyParser.json());
 
 // ====== ENV ======
 const {
   SUPABASE_URL,
   SUPABASE_ANON_KEY,
-  BUSINESS_API_SECRET,     // secret por negocio (tabla businesses.api_secret)
-  DEFAULT_NEGOCIO_NAME,    // nombre del negocio (texto), ej. "spa_roma"
+  BUSINESS_API_SECRET,
+  DEFAULT_NEGOCIO_NAME,
   ENABLE_OUTBOUND = "true",
-
-  // Opcionales: personalización de plantillas
   BUSINESS_NAME = "Tu Negocio",
   BUSINESS_LOCATION = "Tu dirección o zona",
   BUSINESS_HOURS = "L–S 10:00–20:00",
@@ -33,7 +21,7 @@ const {
   BUSINESS_HASHTAG = "tu_negocio",
 } = process.env;
 
-// ====== Plantillas con placeholders [[...]] ======
+// ====== PLANTILLAS ======
 const TEMPLATES = {
   WELCOME: `
 🙌 ¡Hola! Soy el asistente de [[NOMBRE_NEGOCIO]].
@@ -76,34 +64,6 @@ ID: [[ID_CITA]]
 "cancelar [[ID_CITA]]"
 `.trim(),
 
-  REMINDER_24H: `
-⏰ *Recordatorio de tu cita para mañana*
-👤 [[CLIENTE]]
-💇 [[SERVICIO]]
-📅 [[FECHA]] [[HORA]]
-📍 [[SUCURSAL]]
-
-Por favor llega 5–10 min antes. 
-Responde "reprogramar" si necesitas moverla.
-`.trim(),
-
-  REMINDER_3H: `
-🔔 *Nos vemos hoy*
-👤 [[CLIENTE]]
-💇 [[SERVICIO]]
-🕒 [[HORA]] — [[SUCURSAL]]
-
-Si no puedes asistir, responde "reprogramar".
-`.trim(),
-
-  REPROGRAM: `
-🔄 ¡Claro! Para reprogramar tu cita:
-• Escribe: reservar AAAA-MM-DD HH:MM [[CLIENTE]] - [[SERVICIO]]
-• O dime el rango que prefieres (ej. “mañana después de las 4 pm”).
-
-Te ofrezco opciones si me das día y horario aproximado 😉
-`.trim(),
-
   CANCEL_OK: `
 ❌ *Cita cancelada*
 ID: [[ID_CITA]]
@@ -123,7 +83,7 @@ reservar AAAA-MM-DD HH:MM [[CLIENTE]] - [[SERVICIO]]
 `.trim(),
 };
 
-// ====== Utilidades ======
+// ====== UTIL ======
 function renderTemplate(str, map) {
   return str
     .replaceAll("[[NOMBRE_NEGOCIO]]", map.name || BUSINESS_NAME)
@@ -132,7 +92,6 @@ function renderTemplate(str, map) {
     .replaceAll("[[TEL_CORTO]]", map.phone || BUSINESS_PHONE)
     .replaceAll("[[SUCURSAL]]", map.branch || BUSINESS_BRANCH)
     .replaceAll("[[HASHTAG_NEGOCIO]]", map.hashtag || BUSINESS_HASHTAG)
-
     .replaceAll("[[ID_CITA]]", map.id || "")
     .replaceAll("[[CLIENTE]]", map.client || "")
     .replaceAll("[[SERVICIO]]", map.service || "")
@@ -178,29 +137,27 @@ async function rpc(fn, body) {
   }
 }
 
-// ====== Health ======
+// ====== HEALTH ======
 app.get("/", (_, res) => res.status(200).send("OK AutoCitaMX"));
 
-// ====== WhatsApp Webhook ======
+// ====== WHATSAPP WEBHOOK ======
 app.post("/whatsapp", async (req, res) => {
   try {
-    // Twilio envía x-www-form-urlencoded: Body, From, WaId, ProfileName
     const rawBody = (req.body.Body || "").toString();
-    const waid = (req.body.WaId || "").toString().trim();          // solo números
-    const profile = (req.body.ProfileName || "").toString().trim(); // nombre de contacto
-
-    // Normalización del texto para parseo
+    const waid = (req.body.WaId || "").toString().trim();
+    const profile = (req.body.ProfileName || "").toString().trim();
     const body = rawBody.normalize("NFKC").replace(/\s+/g, " ").trim();
     const lower = body.toLowerCase();
 
-    // Detectar negocio por hashtag (#mi_negocio) o default
     const mTag = rawBody.match(/#([a-z0-9_\-]+)/i);
-    const negocioName = mTag ? mTag[1].toLowerCase() : (DEFAULT_NEGOCIO_NAME || BUSINESS_HASHTAG || "mi_negocio");
+    const negocioName =
+      mTag?.[1]?.toLowerCase() ||
+      DEFAULT_NEGOCIO_NAME ||
+      BUSINESS_HASHTAG ||
+      "mi_negocio";
 
-    // Mensajes vacíos → no respondas con error (evita loops)
     if (!body) return res.type("text/xml").send(twiml(""));
 
-    // ==== AYUDA / MENÚ ====
     if (["hola", "menu", "menú"].includes(lower)) {
       const msg = renderTemplate(TEMPLATES.WELCOME, {
         name: BUSINESS_NAME,
@@ -213,17 +170,15 @@ app.post("/whatsapp", async (req, res) => {
       return res.type("text/xml").send(twiml(msg));
     }
 
-    if (lower === "ayuda" || lower === "help" || lower === "?") {
-      const msg = renderTemplate(TEMPLATES.HELP, { hashtag: negocioName || BUSINESS_HASHTAG });
+    if (["ayuda", "help", "?"].includes(lower)) {
+      const msg = renderTemplate(TEMPLATES.HELP, { hashtag: negocioName });
       return res.type("text/xml").send(twiml(msg));
     }
 
-    // ==== CANCELAR ====
     if (lower.startsWith("cancelar")) {
       const id = body.split(" ")[1] || "";
-      if (!id) {
+      if (!id)
         return res.type("text/xml").send(twiml("Falta ID. Ej: cancelar ACMX-..."));
-      }
       try {
         await rpc("rpc_patch_cita", {
           p_secret: BUSINESS_API_SECRET,
@@ -233,23 +188,24 @@ app.post("/whatsapp", async (req, res) => {
         const msg = renderTemplate(TEMPLATES.CANCEL_OK, {
           id,
           client: profile || (waid ? `WA:${waid}` : "Cliente"),
-          service: "", // opcional
+          service: "",
         });
         return res.type("text/xml").send(twiml(msg));
       } catch (e) {
-        return res.type("text/xml").send(twiml(`⚠️ No se pudo cancelar: ${String(e).slice(0, 180)}`));
+        return res
+          .type("text/xml")
+          .send(twiml(`⚠️ No se pudo cancelar: ${String(e).slice(0, 180)}`));
       }
     }
 
-    // ==== RESERVAR ====
     if (lower === "reservar") {
       const msg = renderTemplate(TEMPLATES.RESERVAR_GUIDE, { hashtag: negocioName });
       return res.type("text/xml").send(twiml(msg));
     }
 
     if (lower.startsWith("reservar")) {
-      // Soporta: reservar YYYY-MM-DD HH:MM Nombre - Servicio
-      const regex = /reservar\s+(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})\s+(.+?)(?:\s*-\s*(.+))?$/i;
+      const regex =
+        /reservar\s+(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})\s+(.+?)(?:\s*-\s*(.+))?$/i;
       const mm = rawBody.normalize("NFKC").match(regex);
       if (!mm) {
         const msg = renderTemplate(TEMPLATES.RESERVAR_GUIDE, { hashtag: negocioName });
@@ -258,15 +214,11 @@ app.post("/whatsapp", async (req, res) => {
 
       const fecha = mm[1];
       const hora = mm[2];
-      const nombreCrudo = (mm[3] || "").trim();
-      const servicioCrudo = (mm[4] || "").trim();
-
-      const cliente = nombreCrudo || profile || (waid ? `WA:${waid}` : "Cliente");
-      const servicio = servicioCrudo || "Servicio";
+      const cliente = (mm[3] || profile || `WA:${waid}`).trim();
+      const servicio = (mm[4] || "Servicio").trim();
 
       const id = genId();
       try {
-        // Tu RPC espera p_negocio_id = NOMBRE del negocio (texto)
         await rpc("rpc_upsert_cita", {
           p_secret: BUSINESS_API_SECRET,
           p_id: id,
@@ -292,20 +244,12 @@ app.post("/whatsapp", async (req, res) => {
         });
         return res.type("text/xml").send(twiml(msg));
       } catch (e) {
-        return res.type("text/xml").send(twiml(`⚠️ No se pudo reservar: ${String(e).slice(0, 180)}`));
+        return res
+          .type("text/xml")
+          .send(twiml(`⚠️ No se pudo reservar: ${String(e).slice(0, 180)}`));
       }
     }
 
-    // ==== REPROGRAMAR ====
-    if (lower.startsWith("reprogramar")) {
-      const msg = renderTemplate(TEMPLATES.REPROGRAM, {
-        client: profile || (waid ? `WA:${waid}` : "Cliente"),
-        service: "servicio",
-      });
-      return res.type("text/xml").send(twiml(msg));
-    }
-
-    // ==== Desconocido → menú ====
     const msg = renderTemplate(TEMPLATES.WELCOME, {
       name: BUSINESS_NAME,
       location: BUSINESS_LOCATION,
@@ -320,6 +264,6 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// ====== Start ======
+// ====== START SERVER ======
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log("AutoCitaMX listening on " + port));
+app.listen(port, () => console.log("✅ AutoCitaMX listening on port " + port));
