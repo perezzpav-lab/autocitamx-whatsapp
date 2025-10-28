@@ -1,17 +1,26 @@
-// ===== AutoCitaMX — index.js (Render, ES Modules, sin body-parser) =====
+// ===== AutoCitaMX — index.js (Render, ES Modules, robusto con logs y GET/POST) =====
 import express from "express";
 
 const app = express();
-// Parsers nativos de Express:
-app.use(express.urlencoded({ extended: true })); // Twilio manda x-www-form-urlencoded
+
+// Parsers (Twilio envía x-www-form-urlencoded)
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+
+// ---- LOG de cada request (método, ruta, query, body) ----
+app.use((req, _res, next) => {
+  try {
+    console.log(`[REQ] ${req.method} ${req.path} :: query=`, req.query, ":: body=", req.body);
+  } catch {}
+  next();
+});
 
 // ====== ENV ======
 const {
   SUPABASE_URL,
   SUPABASE_ANON_KEY,
   BUSINESS_API_SECRET,
-  DEFAULT_NEGOCIO_NAME,
+  DEFAULT_NEGOCIO_NAME,           // nombre de negocio que usa tu RPC (ej. "spa_roma")
   ENABLE_OUTBOUND = "true",
 
   // Branding opcional (plantillas)
@@ -22,6 +31,11 @@ const {
   BUSINESS_BRANCH = "Sucursal Principal",
   BUSINESS_HASHTAG = "tu_negocio",
 } = process.env;
+
+// Valida env mínimos
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !BUSINESS_API_SECRET) {
+  console.warn("⚠️ Falta configurar SUPABASE_URL / SUPABASE_ANON_KEY / BUSINESS_API_SECRET en Render → Environment.");
+}
 
 // ====== PLANTILLAS ======
 const TEMPLATES = {
@@ -86,6 +100,8 @@ reservar AAAA-MM-DD HH:MM [[CLIENTE]] - [[SERVICIO]]
 };
 
 // ====== UTIL ======
+const twiml = (msg) => `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${msg}</Message></Response>`;
+
 function renderTemplate(str, map) {
   return str
     .replaceAll("[[NOMBRE_NEGOCIO]]", map.name || BUSINESS_NAME)
@@ -99,10 +115,6 @@ function renderTemplate(str, map) {
     .replaceAll("[[SERVICIO]]", map.service || "")
     .replaceAll("[[FECHA]]", map.date || "")
     .replaceAll("[[HORA]]", map.time || "");
-}
-
-function twiml(msg) {
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${msg}</Message></Response>`;
 }
 
 function genId() {
@@ -121,7 +133,8 @@ function genId() {
 }
 
 async function rpc(fn, body) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+  const url = `${SUPABASE_URL}/rest/v1/rpc/${fn}`;
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       apikey: SUPABASE_ANON_KEY,
@@ -132,22 +145,46 @@ async function rpc(fn, body) {
   });
   const txt = await res.text();
   if (!res.ok) throw new Error(`RPC ${fn} ${res.status}: ${txt}`);
-  try {
-    return JSON.parse(txt);
-  } catch {
-    return txt;
-  }
+  try { return JSON.parse(txt); } catch { return txt; }
 }
 
 // ====== HEALTH ======
-app.get("/", (_, res) => res.status(200).send("OK AutoCitaMX"));
+app.get("/", (_req, res) => {
+  res
+    .status(200)
+    .send("✅ AutoCitaMX listening — / (GET) OK · /whatsapp (POST/GET) listo · /__echo (debug)");
+});
 
-// ====== WHATSAPP WEBHOOK ======
-app.post("/whatsapp", async (req, res) => {
+// ====== GET para ver que /whatsapp está vivo (pruebas de navegador) ======
+app.get("/whatsapp", (req, res) => {
+  res
+    .status(200)
+    .send("OK /whatsapp — usa POST x-www-form-urlencoded (Twilio) o prueba con curl. También tienes /__echo para debug.");
+});
+
+// ====== DEBUG: echo para ver lo que llega ======
+app.all("/__echo", (req, res) => {
+  res.status(200).json({
+    method: req.method,
+    path: req.path,
+    headers: req.headers,
+    query: req.query,
+    body: req.body,
+  });
+});
+
+// ====== WHATSAPP WEBHOOK (acepta POST de Twilio y GET para pruebas) ======
+app.all("/whatsapp", async (req, res) => {
   try {
-    const rawBody = (req.body.Body || "").toString();
-    const waid = (req.body.WaId || "").toString().trim();
-    const profile = (req.body.ProfileName || "").toString().trim();
+    // Twilio manda POST x-www-form-urlencoded: Body, From, WaId, ProfileName
+    // Para GET de prueba desde navegador, también leemos de querystring
+    const isPost = req.method === "POST";
+    const src = isPost ? req.body : req.query;
+
+    const rawBody = (src?.Body || "").toString();
+    const waid = (src?.WaId || "").toString().trim();
+    const profile = (src?.ProfileName || "").toString().trim();
+
     const body = rawBody.normalize("NFKC").replace(/\s+/g, " ").trim();
     const lower = body.toLowerCase();
 
@@ -159,6 +196,7 @@ app.post("/whatsapp", async (req, res) => {
       BUSINESS_HASHTAG ||
       "mi_negocio";
 
+    // Si viene vacío, responde vacío (evita loops)
     if (!body) return res.type("text/xml").send(twiml(""));
 
     // MENÚ
@@ -198,9 +236,7 @@ app.post("/whatsapp", async (req, res) => {
         });
         return res.type("text/xml").send(twiml(msg));
       } catch (e) {
-        return res
-          .type("text/xml")
-          .send(twiml(`⚠️ No se pudo cancelar: ${String(e).slice(0, 180)}`));
+        return res.type("text/xml").send(twiml(`⚠️ No se pudo cancelar: ${String(e).slice(0, 180)}`));
       }
     }
 
@@ -212,6 +248,7 @@ app.post("/whatsapp", async (req, res) => {
 
     // RESERVAR (con datos)
     if (lower.startsWith("reservar")) {
+      // Formato: reservar YYYY-MM-DD HH:MM Nombre - Servicio
       const regex =
         /reservar\s+(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})\s+(.+?)(?:\s*-\s*(.+))?$/i;
       const mm = rawBody.normalize("NFKC").match(regex);
@@ -230,7 +267,7 @@ app.post("/whatsapp", async (req, res) => {
         await rpc("rpc_upsert_cita", {
           p_secret: BUSINESS_API_SECRET,
           p_id: id,
-          p_negocio_id: negocioName, // tu RPC usa NOMBRE de negocio
+          p_negocio_id: negocioName, // OBLIGATORIO: nombre del negocio (texto) que coincide con tu tabla
           p_fecha: fecha,
           p_hora: hora,
           p_cliente: cliente,
@@ -252,9 +289,7 @@ app.post("/whatsapp", async (req, res) => {
         });
         return res.type("text/xml").send(twiml(msg));
       } catch (e) {
-        return res
-          .type("text/xml")
-          .send(twiml(`⚠️ No se pudo reservar: ${String(e).slice(0, 180)}`));
+        return res.type("text/xml").send(twiml(`⚠️ No se pudo reservar: ${String(e).slice(0, 180)}`));
       }
     }
 
@@ -269,10 +304,17 @@ app.post("/whatsapp", async (req, res) => {
     });
     return res.type("text/xml").send(twiml(msg));
   } catch (err) {
+    console.error("[ERR] /whatsapp handler:", err);
     return res.type("text/xml").send(twiml(`Error: ${String(err).slice(0, 180)}`));
   }
 });
 
-// ====== START ======
+// 404 logger (cualquier ruta no encontrada)
+app.use((req, res) => {
+  console.warn("[404]", req.method, req.path);
+  res.status(404).send("Not found");
+});
+
+// START
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("✅ AutoCitaMX listening on port " + port));
