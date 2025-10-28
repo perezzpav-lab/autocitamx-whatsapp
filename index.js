@@ -1,13 +1,11 @@
-// ===== AutoCitaMX — index.js (Render, ES Modules, robusto con logs y GET/POST) =====
+// ===== AutoCitaMX — index.js (Render, ES Modules, compat Twilio ES/EN + logs) =====
 import express from "express";
 
 const app = express();
-
-// Parsers (Twilio envía x-www-form-urlencoded)
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true })); // Twilio: x-www-form-urlencoded
 app.use(express.json());
 
-// ---- LOG de cada request (método, ruta, query, body) ----
+// ---- LOG de cada request ----
 app.use((req, _res, next) => {
   try {
     console.log(`[REQ] ${req.method} ${req.path} :: query=`, req.query, ":: body=", req.body);
@@ -20,10 +18,10 @@ const {
   SUPABASE_URL,
   SUPABASE_ANON_KEY,
   BUSINESS_API_SECRET,
-  DEFAULT_NEGOCIO_NAME,           // nombre de negocio que usa tu RPC (ej. "spa_roma")
+  DEFAULT_NEGOCIO_NAME,            // ej. "spa_roma"
   ENABLE_OUTBOUND = "true",
 
-  // Branding opcional (plantillas)
+  // Branding opcional
   BUSINESS_NAME = "Tu Negocio",
   BUSINESS_LOCATION = "Tu dirección o zona",
   BUSINESS_HOURS = "L–S 10:00–20:00",
@@ -32,12 +30,7 @@ const {
   BUSINESS_HASHTAG = "tu_negocio",
 } = process.env;
 
-// Valida env mínimos
-if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !BUSINESS_API_SECRET) {
-  console.warn("⚠️ Falta configurar SUPABASE_URL / SUPABASE_ANON_KEY / BUSINESS_API_SECRET en Render → Environment.");
-}
-
-// ====== PLANTILLAS ======
+// ====== Plantillas ======
 const TEMPLATES = {
   WELCOME: `
 🙌 ¡Hola! Soy el asistente de [[NOMBRE_NEGOCIO]].
@@ -97,10 +90,21 @@ reservar AAAA-MM-DD HH:MM [[CLIENTE]] - [[SERVICIO]]
    ej: cancelar ACMX-202511051000-ABCD
 • negocio opcional: #[[HASHTAG_NEGOCIO]]
 `.trim(),
+
+  PRECIOS: `
+💈 *Servicios principales*:
+• Corte clásico — $150
+• Corte + Barba — $220
+• Barba — $120
+
+👉 Reserva con: 
+reservar AAAA-MM-DD HH:MM TuNombre - Servicio #[[HASHTAG_NEGOCIO]]
+`.trim(),
 };
 
-// ====== UTIL ======
-const twiml = (msg) => `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${msg}</Message></Response>`;
+// ====== Utils ======
+const twiml = (msg) =>
+  `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${msg}</Message></Response>`;
 
 function renderTemplate(str, map) {
   return str
@@ -148,81 +152,115 @@ async function rpc(fn, body) {
   try { return JSON.parse(txt); } catch { return txt; }
 }
 
+// ----- helpers para compatibilidad de campos EN/ES -----
+function pick(obj, keys = []) {
+  for (const k of keys) {
+    if (obj && Object.prototype.hasOwnProperty.call(obj, k) && obj[k] != null) return obj[k];
+  }
+  return undefined;
+}
+
+// extrae número de 'whatsapp:+521234...' -> '521234...'
+function extractWaIdFromFromField(fromStr = "") {
+  const m = String(fromStr || "").match(/whatsapp:\+?(\d+)/i);
+  return m ? m[1] : "";
+}
+
+// intenta leer id de wa desde metadatos (spanish key)
+function extractWaIdFromChannelMeta(metaStr = "") {
+  try {
+    const json = JSON.parse(metaStr);
+    const ctx = json?.datos?.contexto || json?.context || {};
+    // nombres posibles
+    return ctx["Id. de wa"] || ctx["wa_id"] || ctx["WaId"] || "";
+  } catch {
+    return "";
+  }
+}
+
 // ====== HEALTH ======
 app.get("/", (_req, res) => {
   res
     .status(200)
-    .send("✅ AutoCitaMX listening — / (GET) OK · /whatsapp (POST/GET) listo · /__echo (debug)");
+    .send("✅ AutoCitaMX listening — /whatsapp (POST/GET) listo · /__echo (debug)");
 });
 
-// ====== GET para ver que /whatsapp está vivo (pruebas de navegador) ======
-app.get("/whatsapp", (req, res) => {
-  res
-    .status(200)
-    .send("OK /whatsapp — usa POST x-www-form-urlencoded (Twilio) o prueba con curl. También tienes /__echo para debug.");
-});
-
-// ====== DEBUG: echo para ver lo que llega ======
+// Debug
 app.all("/__echo", (req, res) => {
-  res.status(200).json({
-    method: req.method,
-    path: req.path,
-    headers: req.headers,
-    query: req.query,
-    body: req.body,
-  });
+  res.status(200).json({ method: req.method, path: req.path, headers: req.headers, query: req.query, body: req.body });
 });
 
-// ====== WHATSAPP WEBHOOK (acepta POST de Twilio y GET para pruebas) ======
+// ====== WhatsApp Webhook (acepta POST de Twilio y GET para probar) ======
 app.all("/whatsapp", async (req, res) => {
   try {
-    // Twilio manda POST x-www-form-urlencoded: Body, From, WaId, ProfileName
-    // Para GET de prueba desde navegador, también leemos de querystring
     const isPost = req.method === "POST";
     const src = isPost ? req.body : req.query;
 
-    const rawBody = (src?.Body || "").toString();
-    const waid = (src?.WaId || "").toString().trim();
-    const profile = (src?.ProfileName || "").toString().trim();
+    // Campos en inglés o español:
+    const rawBody =
+      pick(src, ["Body", "Cuerpo", "body", "Mensaje"]) ?? "";
+    const from =
+      pick(src, ["From", "De", "from"]) ?? "";
+    let waid =
+      pick(src, ["WaId", "waId", "WAID", "WaID", "Identificador de la wa", "Id. de wa"]) ?? "";
+    const profile =
+      pick(src, ["ProfileName", "Nombre del perfil", "profileName"]) ?? "";
 
-    const body = rawBody.normalize("NFKC").replace(/\s+/g, " ").trim();
+    // Canal/metadata (por si viene el waId ahí)
+    const channelMeta =
+      pick(src, ["ChannelMetadata", "Metadatos del canal", "channelMetadata"]) ?? "";
+
+    // Fallbacks para WaId
+    if (!waid) waid = extractWaIdFromFromField(from);
+    if (!waid && channelMeta) waid = extractWaIdFromChannelMeta(channelMeta);
+
+    const body = String(rawBody).normalize("NFKC").replace(/\s+/g, " ").trim();
     const lower = body.toLowerCase();
 
-    // Detectar negocio por hashtag o usar default
-    const mTag = rawBody.match(/#([a-z0-9_\-]+)/i);
+    // Detectar #negocio en texto o usar default
+    const mTag = String(rawBody).match(/#([a-z0-9_\-]+)/i);
     const negocioName =
-      mTag?.[1]?.toLowerCase() ||
+      (mTag?.[1]?.toLowerCase()) ||
       DEFAULT_NEGOCIO_NAME ||
       BUSINESS_HASHTAG ||
       "mi_negocio";
 
-    // Si viene vacío, responde vacío (evita loops)
     if (!body) return res.type("text/xml").send(twiml(""));
 
-    // MENÚ
+    // ===== Menú / Hola =====
     if (["hola", "menu", "menú"].includes(lower)) {
       const msg = renderTemplate(TEMPLATES.WELCOME, {
-        name: BUSINESS_NAME,
-        location: BUSINESS_LOCATION,
-        hours: BUSINESS_HOURS,
-        phone: BUSINESS_PHONE,
-        branch: BUSINESS_BRANCH,
-        hashtag: BUSINESS_HASHTAG,
+        name: BUSINESS_NAME, location: BUSINESS_LOCATION, hours: BUSINESS_HOURS,
+        phone: BUSINESS_PHONE, branch: BUSINESS_BRANCH, hashtag: BUSINESS_HASHTAG,
       });
       return res.type("text/xml").send(twiml(msg));
     }
 
-    // AYUDA
+    // ===== Numeritos de menú =====
+    if (lower === "1") {
+      const msg = renderTemplate(TEMPLATES.RESERVAR_GUIDE, { hashtag: negocioName });
+      return res.type("text/xml").send(twiml(msg));
+    }
+    if (lower === "2") {
+      return res.type("text/xml").send(twiml(
+        '🔄 Para cambiar o cancelar:\n• "cancelar ID"\n• o envía un nuevo "reservar YYYY-MM-DD HH:MM Nombre - Servicio"'
+      ));
+    }
+    if (lower === "3") {
+      const msg = renderTemplate(TEMPLATES.PRECIOS, { hashtag: negocioName });
+      return res.type("text/xml").send(twiml(msg));
+    }
+
+    // ===== Ayuda =====
     if (["ayuda", "help", "?"].includes(lower)) {
       const msg = renderTemplate(TEMPLATES.HELP, { hashtag: negocioName });
       return res.type("text/xml").send(twiml(msg));
     }
 
-    // CANCELAR
+    // ===== Cancelar =====
     if (lower.startsWith("cancelar")) {
       const id = body.split(" ")[1] || "";
-      if (!id)
-        return res.type("text/xml").send(twiml("Falta ID. Ej: cancelar ACMX-..."));
+      if (!id) return res.type("text/xml").send(twiml("Falta ID. Ej: cancelar ACMX-..."));
       try {
         await rpc("rpc_patch_cita", {
           p_secret: BUSINESS_API_SECRET,
@@ -240,26 +278,25 @@ app.all("/whatsapp", async (req, res) => {
       }
     }
 
-    // RESERVAR (solo palabra)
+    // ===== Reservar (palabra suelta) =====
     if (lower === "reservar") {
       const msg = renderTemplate(TEMPLATES.RESERVAR_GUIDE, { hashtag: negocioName });
       return res.type("text/xml").send(twiml(msg));
     }
 
-    // RESERVAR (con datos)
+    // ===== Reservar (con datos) =====
     if (lower.startsWith("reservar")) {
       // Formato: reservar YYYY-MM-DD HH:MM Nombre - Servicio
       const regex =
         /reservar\s+(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})\s+(.+?)(?:\s*-\s*(.+))?$/i;
-      const mm = rawBody.normalize("NFKC").match(regex);
+      const mm = String(rawBody).normalize("NFKC").match(regex);
       if (!mm) {
         const msg = renderTemplate(TEMPLATES.RESERVAR_GUIDE, { hashtag: negocioName });
         return res.type("text/xml").send(twiml(msg));
       }
-
       const fecha = mm[1];
       const hora = mm[2];
-      const cliente = (mm[3] || profile || `WA:${waid}`).trim();
+      const cliente = (mm[3] || profile || (waid ? `WA:${waid}` : "Cliente")).trim();
       const servicio = (mm[4] || "Servicio").trim();
 
       const id = genId();
@@ -267,11 +304,11 @@ app.all("/whatsapp", async (req, res) => {
         await rpc("rpc_upsert_cita", {
           p_secret: BUSINESS_API_SECRET,
           p_id: id,
-          p_negocio_id: negocioName, // OBLIGATORIO: nombre del negocio (texto) que coincide con tu tabla
+          p_negocio_id: negocioName, // nombre del negocio (texto)
           p_fecha: fecha,
           p_hora: hora,
           p_cliente: cliente,
-          p_telefono: waid ? `+52${waid}` : "",
+          p_telefono: waid ? `+${waid}` : "", // ya incluye país
           p_servicio: servicio,
           p_estado: "confirmada",
           p_monto: 0,
@@ -280,12 +317,7 @@ app.all("/whatsapp", async (req, res) => {
         });
 
         const msg = renderTemplate(TEMPLATES.CONFIRM, {
-          id,
-          client: cliente,
-          service: servicio,
-          date: fecha,
-          time: hora,
-          branch: BUSINESS_BRANCH,
+          id, client: cliente, service: servicio, date: fecha, time: hora, branch: BUSINESS_BRANCH,
         });
         return res.type("text/xml").send(twiml(msg));
       } catch (e) {
@@ -293,14 +325,10 @@ app.all("/whatsapp", async (req, res) => {
       }
     }
 
-    // Desconocido → Menú
+    // ===== Desconocido → Menú =====
     const msg = renderTemplate(TEMPLATES.WELCOME, {
-      name: BUSINESS_NAME,
-      location: BUSINESS_LOCATION,
-      hours: BUSINESS_HOURS,
-      phone: BUSINESS_PHONE,
-      branch: BUSINESS_BRANCH,
-      hashtag: BUSINESS_HASHTAG,
+      name: BUSINESS_NAME, location: BUSINESS_LOCATION, hours: BUSINESS_HOURS,
+      phone: BUSINESS_PHONE, branch: BUSINESS_BRANCH, hashtag: BUSINESS_HASHTAG,
     });
     return res.type("text/xml").send(twiml(msg));
   } catch (err) {
@@ -309,7 +337,7 @@ app.all("/whatsapp", async (req, res) => {
   }
 });
 
-// 404 logger (cualquier ruta no encontrada)
+// 404 logger
 app.use((req, res) => {
   console.warn("[404]", req.method, req.path);
   res.status(404).send("Not found");
