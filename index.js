@@ -1,345 +1,179 @@
-// index.js (ESM)
+// ====== index.js (PATCH mínimo para Supabase 'citas') ======
 import express from "express";
-import dotenv from "dotenv";
-import Twilio from "twilio";
+import bodyParser from "body-parser";
 
-dotenv.config();
+// Usa Node 18+ con fetch nativo, si no: import fetch from "node-fetch";
 
 const app = express();
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+app.use(bodyParser.urlencoded({ extended: true })); // Twilio manda x-www-form-urlencoded
+app.use(bodyParser.json());
 
-// === ENV ===
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
-const TWILIO_WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM || ""; // ej: "whatsapp:+52XXXXXXXXXX"
-const ENABLE_OUTBOUND = (process.env.ENABLE_OUTBOUND || "true") === "true";
+// === ENV requeridas en Render ===
+// SUPABASE_URL=https://qffstwhizihtexfompwe.supabase.co
+// SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+// BUSINESS_API_SECRET=959f67a7554dcc6e05f5c1a20d867d244c9387875c74059b
+// ENABLE_OUTBOUND=true   (si quieres que Twilio responda al cliente)
 
-const twilioClient =
-  TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
-    ? new Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    : null;
+const {
+  SUPABASE_URL,
+  SUPABASE_ANON_KEY,
+  BUSINESS_API_SECRET,
+  ENABLE_OUTBOUND = "true",
+} = process.env;
 
-// === ESTADO EN MEMORIA (prototipo) ===
-const sessions = new Map(); // key: phone, value: {ref, service, date, time, price}
-const processedSids = new Set(); // idempotencia por mensaje entrante
-
-function alreadyProcessed(sid) {
-  if (!sid) return false;
-  if (processedSids.has(sid)) return true;
-  processedSids.add(sid);
-  if (processedSids.size > 5000) processedSids.clear(); // limpieza simple
-  return false;
+function twiml(msg) {
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${msg}</Message></Response>`;
+}
+function genId() {
+  const d = new Date();
+  const pad = (n) => (n < 10 ? "0" : "") + n;
+  const ts =
+    d.getFullYear() +
+    "" +
+    pad(d.getMonth() + 1) +
+    pad(d.getDate()) +
+    pad(d.getHours()) +
+    pad(d.getMinutes()) +
+    pad(d.getSeconds());
+  const rnd = Math.random().toString(36).slice(2, 6).toUpperCase();
+  return `ACMX-${ts}-${rnd}`;
 }
 
-// === HELPERS ===
-const pad2 = (n) => n.toString().padStart(2, "0");
-const genRef = () => `ACT-${Math.floor(1000 + Math.random() * 9000)}`;
-
-function normalizarFecha(token) {
-  const ymd = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/; // 2025-10-31
-  const dm = /^(\d{1,2})[\/-](\d{1,2})$/; // 31/10
-  if (ymd.test(token)) {
-    const [, y, m, d] = token.match(ymd);
-    return `${y}-${pad2(m)}-${pad2(d)}`;
-  }
-  if (dm.test(token)) {
-    const now = new Date();
-    const y = now.getUTCFullYear();
-    const [, d, m] = token.match(dm);
-    return `${y}-${pad2(m)}-${pad2(d)}`;
-  }
-  return null;
-}
-
-function parsear(texto) {
-  let rest = (texto || "").trim();
-
-  // hora HH:MM
-  let hora = null;
-  const reHora = /\b([01]?\d|2[0-3]):([0-5]\d)\b/;
-  const mh = rest.match(reHora);
-  if (mh) {
-    hora = `${pad2(mh[1])}:${mh[2]}`;
-    rest = rest.replace(mh[0], " ").trim();
-  }
-
-  // fecha
-  let fecha = null;
-  const tokens = rest.split(/\s+/);
-  for (const t of tokens) {
-    const f = normalizarFecha(t);
-    if (f) {
-      fecha = f;
-      rest = rest.replace(t, " ").trim();
-      break;
-    }
-  }
-
-  // precio (último número)
-  let precio = null;
-  const rePrecio = /(?:\$?\s*)(\d+(?:[.,]\d{1,2})?)(?!\S)/g;
-  let m,
-    last = null;
-  while ((m = rePrecio.exec(rest)) !== null) last = m[1];
-  if (last) {
-    precio = parseFloat(last.replace(",", "."));
-    rest = rest.replace(new RegExp(`${last}\\b`), " ").trim();
-  }
-
-  // servicio
-  let servicio = rest.replace(/\s{2,}/g, " ").trim();
-  if (!servicio) servicio = "Pendiente";
-
-  // defaults
-  if (!fecha) {
-    const now = new Date();
-    fecha = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(
-      now.getDate()
-    )}`;
-  }
-  if (!hora) hora = "12:00";
-  if (precio == null || Number.isNaN(precio)) precio = 0;
-
-  return { servicio, fecha, hora, precio };
-}
-
-// === SUPABASE ===
-const SUPABASE_URL = "https://qffstwhizihtexfompwe.supabase.co";
-const SUPABASE_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFmZnN0d2hpemlodGV4Zm9tcHdlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjEyNDE1NzcsImV4cCI6MjA3NjgxNzU3N30.RyY1ZLHxOfXoO_oVzNai4CMZuvMQUSKRGKT4YcCpesA";
-
-async function sbInsert(payload) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/appointments`, {
+async function rpc(fn, body) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
       apikey: SUPABASE_ANON_KEY,
       Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      Prefer: "return=representation",
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body || {}),
   });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-  return res.json();
-}
-async function sbSelect(limit = 10) {
-  const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/appointments?select=*&order=created_at.desc&limit=${limit}`,
-    {
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      },
-    }
-  );
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-  return res.json();
-}
-
-// === TEXTOS ===
-const firstName = (profileName) =>
-  profileName ? profileName.toString().split(" ")[0] : "Cliente";
-
-const menuTexto = (nombre = "Cliente") =>
-  `Hola ${nombre} 👋
-Elige tu servicio:
-1) Corte
-2) Barba
-3) Facial
-
-O mándame en una línea: Ej.
-Barba 31/10 12:30 90`;
-
-const resumen = (row) =>
-  `Ref ${row.ref}
-Servicio: ${row.service}
-Fecha: ${row.date} ${row.time}
-Precio: $${row.price}`;
-
-// === SAFE TWILIO SEND ===
-async function safeWhatsAppSend({ from, to, body }) {
-  if (!ENABLE_OUTBOUND) {
-    console.log("🔕 Envío deshabilitado (ENABLE_OUTBOUND=false). Solo log.");
-    return { ok: false, skipped: true, reason: "outbound-disabled" };
-  }
-  if (!twilioClient || !/^whatsapp:\+/.test(from) || !/^whatsapp:\+/.test(to)) {
-    console.log("⚠️ No hay cliente Twilio o número inválido, se omite envío.");
-    return { ok: false, skipped: true, reason: "no-client-or-address" };
-  }
+  const txt = await res.text();
+  if (!res.ok) throw new Error(`RPC ${fn} ${res.status}: ${txt}`);
   try {
-    const msg = await twilioClient.messages.create({ from, to, body });
-    console.log("✅ Enviado:", msg.sid);
-    return { ok: true, sid: msg.sid };
-  } catch (e) {
-    if (e?.status === 429 || e?.code === 63038) {
-      console.warn("⚠️ Límite diario de Twilio alcanzado. No se enviará este mensaje.");
-      return { ok: false, rateLimited: true, code: e.code };
-    }
-    console.error("❌ Error al enviar mensaje Twilio:", e?.message || e);
-    return { ok: false, error: e?.message };
+    return JSON.parse(txt);
+  } catch {
+    return txt;
   }
 }
 
-// === HEALTH ===
-app.get("/", (_req, res) => res.send("AutoCitaMX up ✅"));
-app.get("/whatsapp", (_req, res) => res.send("WhatsApp webhook up ✅"));
+// Health
+app.get("/", (_, res) => res.status(200).send("OK AutoCitaMX"));
 
-// === WEBHOOK WHATSAPP ===
+// Webhook Twilio
 app.post("/whatsapp", async (req, res) => {
-  const from = req.body.From || req.body.from || "";
-  let to = req.body.To || req.body.to || "";
-  const body = (req.body.Body || req.body.body || "").trim();
-  const nombre = firstName(req.body.ProfileName);
-  const msgSid = req.body.MessageSid || req.body.SmsMessageSid;
-
-  // Idempotencia: no procesar dos veces el mismo mensaje
-  if (alreadyProcessed(msgSid)) {
-    console.log("♻️ Duplicado ignorado:", msgSid);
-    return res.status(200).send("OK");
-  }
-
-  // Fallback opcional para pruebas manuales
-  if (!to && TWILIO_WHATSAPP_FROM) to = TWILIO_WHATSAPP_FROM;
-
   try {
+    const body = (req.body.Body || "").trim();
+    const waid = (req.body.WaId || "").trim(); // solo números
+    const profile = (req.body.ProfileName || "").trim();
+
+    if (!body) return res.type("text/xml").send(twiml(""));
+
+    // negocio por hashtag (#spa_roma) o por env
+    let bizSecret = BUSINESS_API_SECRET;
+    const m = body.match(/#([a-z0-9_\-]+)/i);
+    let negocioName = null;
+    if (m) {
+      // Si quieres resolver secret por nombre, crea un endpoint o usa Apps Script.
+      // Aquí asumimos que tu BUSINESS_API_SECRET ya es del negocio en uso.
+      negocioName = m[1].toLowerCase(); // para validar en upsert
+    }
+
     const lower = body.toLowerCase();
 
-    // 0) Comandos cortos
-    if (["hola", "menu", "menú", "inicio", "start"].includes(lower)) {
-      await safeWhatsAppSend({ from: to, to: from, body: menuTexto(nombre) });
-      return res.status(200).send("OK");
+    // AYUDA
+    if (/^(ayuda|help|\?)$/.test(lower)) {
+      const help =
+        "📲 AutoCitaMX:\n" +
+        "• reservar YYYY-MM-DD HH:MM Nombre - Servicio\n" +
+        "   ej: reservar 2025-11-05 10:00 Juan - Corte\n" +
+        "• cancelar ID\n" +
+        "   ej: cancelar ACMX-202511051000-ABCD\n" +
+        "• negocio opcional: #spa_roma";
+      return res.type("text/xml").send(twiml(help));
     }
 
-    // 1) Confirmación SI/NO si existe sesión
-    if (sessions.has(from)) {
-      if (["si", "sí", "si.", "sí.", "confirmo"].includes(lower)) {
-        const s = sessions.get(from);
-        const row = {
-          ref: s.ref,
-          phone: from,
-          service: s.service,
-          date: s.date,
-          time: s.time,
-          price: s.price,
-          status: "confirmada",
-        };
-        await sbInsert(row);
-        sessions.delete(from);
-
-        await safeWhatsAppSend({
-          from: to,
-          to: from,
-          body: `✅ Confirmado.\n${resumen(row)}`,
+    // CANCELAR
+    if (lower.startsWith("cancelar ")) {
+      const id = body.split(/\s+/)[1] || "";
+      if (!id) return res.type("text/xml").send(twiml("Falta ID. Ej: cancelar ACMX-..."));
+      try {
+        await rpc("rpc_patch_cita", {
+          p_secret: bizSecret,
+          p_id: id,
+          p_fields: { estado: "cancelada" },
         });
-        return res.status(200).send("OK");
+        return res.type("text/xml").send(twiml(`❌ Cita ${id} cancelada.`));
+      } catch (e) {
+        return res.type("text/xml").send(twiml(`⚠️ No se pudo cancelar: ${String(e).slice(0, 180)}`));
+      }
+    }
+
+    // RESERVAR
+    if (lower.startsWith("reservar ")) {
+      const tokens = body.split(/\s+/);
+      const fecha = tokens[1];
+      const hora = tokens[2];
+      const rest = body.replace(/^reservar\s+\S+\s+\S+\s+/i, "");
+      let cliente = "",
+        servicio = "";
+      if (/\s-\s/.test(rest)) {
+        const parts = rest.split(/\s-\s/);
+        cliente = (parts[0] || profile || `WA:${waid}`).trim();
+        servicio = parts.slice(1).join(" - ").trim() || "Servicio";
+      } else {
+        const rtk = rest.split(/\s+/);
+        cliente = (rtk[0] || profile || `WA:${waid}`).trim();
+        servicio = rtk.slice(1).join(" ").trim() || "Servicio";
+      }
+      if (!fecha || !hora || !cliente) {
+        return res
+          .type("text/xml")
+          .send(twiml('Formato: reservar YYYY-MM-DD HH:MM Nombre - Servicio'));
       }
 
-      if (["no", "no.", "cancelar", "cambiar"].includes(lower)) {
-        sessions.delete(from);
-        await safeWhatsAppSend({
-          from: to,
-          to: from,
-          body: `Sin problema, ${nombre}. ${menuTexto(nombre)}`,
+      const id = genId();
+      // OJO: tu rpc_upsert_cita espera p_negocio_id = NOMBRE del negocio (ej. "spa_roma")
+      const p_negocio_id = negocioName || "spa_roma"; // <-- PON aquí el nombre real de tu negocio si no usas hashtag
+
+      try {
+        await rpc("rpc_upsert_cita", {
+          p_secret: bizSecret,
+          p_id: id,
+          p_negocio_id, // name, no uuid
+          p_fecha: fecha,
+          p_hora: hora,
+          p_cliente: cliente,
+          p_telefono: waid ? `+52${waid}` : "",
+          p_servicio: servicio,
+          p_estado: "confirmada",
+          p_monto: 0,
+          p_forma_pago: "",
+          p_calendar_event_id: "",
         });
-        return res.status(200).send("OK");
+
+        const msg =
+          `✅ Cita creada\n` +
+          `ID: ${id}\n` +
+          `Fecha: ${fecha} ${hora}\n` +
+          `Cliente: ${cliente}\n` +
+          `Servicio: ${servicio}`;
+        return res.type("text/xml").send(twiml(msg));
+      } catch (e) {
+        return res
+          .type("text/xml")
+          .send(twiml(`⚠️ No se pudo reservar: ${String(e).slice(0, 180)}`));
       }
-
-      const s = sessions.get(from);
-      await safeWhatsAppSend({
-        from: to,
-        to: from,
-        body: `¿Confirmas esta cita? Responde SI o NO.\n${resumen(s)}`,
-      });
-      return res.status(200).send("OK");
     }
 
-    // 2) Menú numérico simple
-    if (["1", "2", "3"].includes(lower)) {
-      const servicios = { "1": "Corte", "2": "Barba", "3": "Facial" };
-      const ref = genRef();
-      const { fecha, hora } = parsear(""); // defaults
-      const s = { ref, service: servicios[lower], date: fecha, time: hora, price: 0 };
-      sessions.set(from, s);
-
-      await safeWhatsAppSend({
-        from: to,
-        to: from,
-        body:
-          `Perfecto: ${s.service}\n` +
-          `Propuesta: ${s.date} ${s.time} $${s.price}\n` +
-          `¿Confirmas? Responde **SI** o **NO**.\n` +
-          `También puedes mandar: "Barba 31/10 12:30 90"`,
-      });
-      return res.status(200).send("OK");
-    }
-
-    // 3) Parseo libre
-    const parsed = parsear(body);
-    const ref = genRef();
-    const s = { ref, service: parsed.servicio, date: parsed.fecha, time: parsed.hora, price: parsed.precio };
-    sessions.set(from, s);
-
-    await safeWhatsAppSend({
-      from: to,
-      to: from,
-      body: `¿Confirmas esta cita, ${nombre}? Responde SI o NO.\n${resumen(s)}`,
-    });
-
-    return res.status(200).send("OK");
-  } catch (e) {
-    console.error("❌ Webhook error:", e?.message || e);
-    return res.status(200).send("OK"); // No reintentos en loop por parte de Twilio
+    return res
+      .type("text/xml")
+      .send(twiml('No entendí. Escribe "ayuda" o usa "reservar ..." / "cancelar ..."'));
+  } catch (err) {
+    return res.type("text/xml").send(twiml(`Error: ${String(err).slice(0, 180)}`));
   }
 });
 
-// === TESTS ===
-app.get("/parse-test", (req, res) => {
-  const text = (req.query.text || "").toString();
-  if (!text) return res.json({ ok: false, error: "text vacío" });
-  const p = parsear(text);
-  res.json({
-    ok: true,
-    parsed: {
-      servicio: p.servicio,
-      fecha: p.fecha,
-      hora: p.hora,
-      precio: p.precio,
-    },
-  });
-});
-app.get("/test/insert", async (_req, res) => {
-  try {
-    const ref = genRef();
-    const p = parsear("Test 12:00 0");
-    const row = {
-      ref,
-      phone: "whatsapp:+5210000000000",
-      service: p.servicio,
-      date: p.fecha,
-      time: p.hora,
-      price: p.precio,
-      status: "confirmada",
-    };
-    const inserted = await sbInsert(row);
-    res.json({ ok: true, inserted });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-app.get("/appointments", async (_req, res) => {
-  try {
-    const rows = await sbSelect(10);
-    res.json(rows);
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-// === START ===
-// Puerto dinámico de Render
 const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`✅ Server running on port ${port} | outbound=${ENABLE_OUTBOUND}`);
-});
-
+app.listen(port, () => console.log("AutoCitaMX listening on " + port));
