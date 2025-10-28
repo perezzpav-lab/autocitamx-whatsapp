@@ -1,29 +1,141 @@
-// ====== index.js (PATCH mínimo para Supabase 'citas') ======
-import express from "express";
-import bodyParser from "body-parser";
+// ===== AutoCitaMX — index.js (Render, Twilio WhatsApp + Supabase RPCs 'citas') =====
+// Node 18+ (fetch nativo). Si usas Node <=16, instala node-fetch y cámbialo.
 
-// Usa Node 18+ con fetch nativo, si no: import fetch from "node-fetch";
+const express = require("express");
+const bodyParser = require("body-parser");
 
 const app = express();
-app.use(bodyParser.urlencoded({ extended: true })); // Twilio manda x-www-form-urlencoded
+app.use(bodyParser.urlencoded({ extended: true })); // Twilio envía x-www-form-urlencoded
 app.use(bodyParser.json());
 
-// === ENV requeridas en Render ===
-// SUPABASE_URL=https://qffstwhizihtexfompwe.supabase.co
-// SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-// BUSINESS_API_SECRET=959f67a7554dcc6e05f5c1a20d867d244c9387875c74059b
-// ENABLE_OUTBOUND=true   (si quieres que Twilio responda al cliente)
-
+// ====== ENV ======
 const {
   SUPABASE_URL,
   SUPABASE_ANON_KEY,
-  BUSINESS_API_SECRET,
+  BUSINESS_API_SECRET,     // secret por negocio (tabla businesses.api_secret)
+  DEFAULT_NEGOCIO_NAME,    // nombre del negocio (texto), ej. "spa_roma"
   ENABLE_OUTBOUND = "true",
+
+  // Opcionales: personalización de plantillas
+  BUSINESS_NAME = "Tu Negocio",
+  BUSINESS_LOCATION = "Tu dirección o zona",
+  BUSINESS_HOURS = "L–S 10:00–20:00",
+  BUSINESS_PHONE = "55 0000 0000",
+  BUSINESS_BRANCH = "Sucursal Principal",
+  BUSINESS_HASHTAG = "tu_negocio",
 } = process.env;
+
+// ====== Plantillas con placeholders [[...]] ======
+const TEMPLATES = {
+  WELCOME: `
+🙌 ¡Hola! Soy el asistente de [[NOMBRE_NEGOCIO]].
+
+Puedo ayudarte a:
+1) Reservar cita
+2) Cambiar o cancelar
+3) Ver precios/servicios
+
+✍️ *Escribe:* 
+• "reservar 2025-10-31 12:30 [[Tu Nombre]] - [[Servicio]]"
+• "cancelar [[ID_DE_CITA]]"
+• "ayuda" para ver ejemplos
+
+📍 Sucursal: [[UBICACIÓN_CORTA]]
+🕒 Horario: [[HORARIO_RESUMEN]]
+📱 Tel: [[TEL_CORTO]]
+`.trim(),
+
+  RESERVAR_GUIDE: `
+🗓️ *Para reservar*, envía:
+reservar AAAA-MM-DD HH:MM TuNombre - Servicio
+
+Ejemplo:
+reservar 2025-10-31 12:30 Juan - Corte
+
+👉 Si manejas varias sucursales, agrega su hashtag (opcional):
+#[[HASHTAG_NEGOCIO]]
+`.trim(),
+
+  CONFIRM: `
+✅ *Cita confirmada*
+ID: [[ID_CITA]]
+👤 [[CLIENTE]]
+💇 [[SERVICIO]]
+📅 [[FECHA]] [[HORA]]
+📍 [[SUCURSAL]]
+
+ℹ️ Si necesitas cambiar o cancelar, escribe:
+"cancelar [[ID_CITA]]"
+`.trim(),
+
+  REMINDER_24H: `
+⏰ *Recordatorio de tu cita para mañana*
+👤 [[CLIENTE]]
+💇 [[SERVICIO]]
+📅 [[FECHA]] [[HORA]]
+📍 [[SUCURSAL]]
+
+Por favor llega 5–10 min antes. 
+Responde "reprogramar" si necesitas moverla.
+`.trim(),
+
+  REMINDER_3H: `
+🔔 *Nos vemos hoy*
+👤 [[CLIENTE]]
+💇 [[SERVICIO]]
+🕒 [[HORA]] — [[SUCURSAL]]
+
+Si no puedes asistir, responde "reprogramar".
+`.trim(),
+
+  REPROGRAM: `
+🔄 ¡Claro! Para reprogramar tu cita:
+• Escribe: reservar AAAA-MM-DD HH:MM [[CLIENTE]] - [[SERVICIO]]
+• O dime el rango que prefieres (ej. “mañana después de las 4 pm”).
+
+Te ofrezco opciones si me das día y horario aproximado 😉
+`.trim(),
+
+  CANCEL_OK: `
+❌ *Cita cancelada*
+ID: [[ID_CITA]]
+👤 [[CLIENTE]] — [[SERVICIO]]
+
+¿Deseas agendar otra fecha? Escribe: 
+reservar AAAA-MM-DD HH:MM [[CLIENTE]] - [[SERVICIO]]
+`.trim(),
+
+  HELP: `
+📲 AutoCitaMX:
+• reservar YYYY-MM-DD HH:MM Nombre - Servicio
+   ej: reservar 2025-11-05 10:00 Juan - Corte
+• cancelar ID
+   ej: cancelar ACMX-202511051000-ABCD
+• negocio opcional: #[[HASHTAG_NEGOCIO]]
+`.trim(),
+};
+
+// ====== Utilidades ======
+function renderTemplate(str, map) {
+  return str
+    .replaceAll("[[NOMBRE_NEGOCIO]]", map.name || BUSINESS_NAME)
+    .replaceAll("[[UBICACIÓN_CORTA]]", map.location || BUSINESS_LOCATION)
+    .replaceAll("[[HORARIO_RESUMEN]]", map.hours || BUSINESS_HOURS)
+    .replaceAll("[[TEL_CORTO]]", map.phone || BUSINESS_PHONE)
+    .replaceAll("[[SUCURSAL]]", map.branch || BUSINESS_BRANCH)
+    .replaceAll("[[HASHTAG_NEGOCIO]]", map.hashtag || BUSINESS_HASHTAG)
+
+    .replaceAll("[[ID_CITA]]", map.id || "")
+    .replaceAll("[[CLIENTE]]", map.client || "")
+    .replaceAll("[[SERVICIO]]", map.service || "")
+    .replaceAll("[[FECHA]]", map.date || "")
+    .replaceAll("[[HORA]]", map.time || "");
+}
 
 function twiml(msg) {
   return `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${msg}</Message></Response>`;
 }
+
 function genId() {
   const d = new Date();
   const pad = (n) => (n < 10 ? "0" : "") + n;
@@ -58,90 +170,99 @@ async function rpc(fn, body) {
   }
 }
 
-// Health
+// ====== Health ======
 app.get("/", (_, res) => res.status(200).send("OK AutoCitaMX"));
 
-// Webhook Twilio
+// ====== WhatsApp Webhook ======
 app.post("/whatsapp", async (req, res) => {
   try {
-    const body = (req.body.Body || "").trim();
-    const waid = (req.body.WaId || "").trim(); // solo números
-    const profile = (req.body.ProfileName || "").trim();
+    // Twilio envía x-www-form-urlencoded: Body, From, WaId, ProfileName
+    const rawBody = (req.body.Body || "").toString();
+    const waid = (req.body.WaId || "").toString().trim();          // solo números
+    const profile = (req.body.ProfileName || "").toString().trim(); // nombre de contacto
 
-    if (!body) return res.type("text/xml").send(twiml(""));
-
-    // negocio por hashtag (#spa_roma) o por env
-    let bizSecret = BUSINESS_API_SECRET;
-    const m = body.match(/#([a-z0-9_\-]+)/i);
-    let negocioName = null;
-    if (m) {
-      // Si quieres resolver secret por nombre, crea un endpoint o usa Apps Script.
-      // Aquí asumimos que tu BUSINESS_API_SECRET ya es del negocio en uso.
-      negocioName = m[1].toLowerCase(); // para validar en upsert
-    }
-
+    // Normalización del texto para parseo
+    const body = rawBody.normalize("NFKC").replace(/\s+/g, " ").trim();
     const lower = body.toLowerCase();
 
-    // AYUDA
-    if (/^(ayuda|help|\?)$/.test(lower)) {
-      const help =
-        "📲 AutoCitaMX:\n" +
-        "• reservar YYYY-MM-DD HH:MM Nombre - Servicio\n" +
-        "   ej: reservar 2025-11-05 10:00 Juan - Corte\n" +
-        "• cancelar ID\n" +
-        "   ej: cancelar ACMX-202511051000-ABCD\n" +
-        "• negocio opcional: #spa_roma";
-      return res.type("text/xml").send(twiml(help));
+    // Detectar negocio por hashtag (#mi_negocio) o default
+    const mTag = rawBody.match(/#([a-z0-9_\-]+)/i);
+    const negocioName = mTag ? mTag[1].toLowerCase() : (DEFAULT_NEGOCIO_NAME || BUSINESS_HASHTAG || "mi_negocio");
+
+    // Mensajes vacíos → no respondas con error (evita loops)
+    if (!body) return res.type("text/xml").send(twiml(""));
+
+    // ==== AYUDA / MENÚ ====
+    if (["hola", "menu", "menú"].includes(lower)) {
+      const msg = renderTemplate(TEMPLATES.WELCOME, {
+        name: BUSINESS_NAME,
+        location: BUSINESS_LOCATION,
+        hours: BUSINESS_HOURS,
+        phone: BUSINESS_PHONE,
+        branch: BUSINESS_BRANCH,
+        hashtag: BUSINESS_HASHTAG,
+      });
+      return res.type("text/xml").send(twiml(msg));
     }
 
-    // CANCELAR
-    if (lower.startsWith("cancelar ")) {
-      const id = body.split(/\s+/)[1] || "";
-      if (!id) return res.type("text/xml").send(twiml("Falta ID. Ej: cancelar ACMX-..."));
+    if (lower === "ayuda" || lower === "help" || lower === "?") {
+      const msg = renderTemplate(TEMPLATES.HELP, { hashtag: negocioName || BUSINESS_HASHTAG });
+      return res.type("text/xml").send(twiml(msg));
+    }
+
+    // ==== CANCELAR ====
+    if (lower.startsWith("cancelar")) {
+      const id = body.split(" ")[1] || "";
+      if (!id) {
+        return res.type("text/xml").send(twiml("Falta ID. Ej: cancelar ACMX-..."));
+      }
       try {
         await rpc("rpc_patch_cita", {
-          p_secret: bizSecret,
+          p_secret: BUSINESS_API_SECRET,
           p_id: id,
           p_fields: { estado: "cancelada" },
         });
-        return res.type("text/xml").send(twiml(`❌ Cita ${id} cancelada.`));
+        const msg = renderTemplate(TEMPLATES.CANCEL_OK, {
+          id,
+          client: profile || (waid ? `WA:${waid}` : "Cliente"),
+          service: "", // opcional
+        });
+        return res.type("text/xml").send(twiml(msg));
       } catch (e) {
         return res.type("text/xml").send(twiml(`⚠️ No se pudo cancelar: ${String(e).slice(0, 180)}`));
       }
     }
 
-    // RESERVAR
-    if (lower.startsWith("reservar ")) {
-      const tokens = body.split(/\s+/);
-      const fecha = tokens[1];
-      const hora = tokens[2];
-      const rest = body.replace(/^reservar\s+\S+\s+\S+\s+/i, "");
-      let cliente = "",
-        servicio = "";
-      if (/\s-\s/.test(rest)) {
-        const parts = rest.split(/\s-\s/);
-        cliente = (parts[0] || profile || `WA:${waid}`).trim();
-        servicio = parts.slice(1).join(" - ").trim() || "Servicio";
-      } else {
-        const rtk = rest.split(/\s+/);
-        cliente = (rtk[0] || profile || `WA:${waid}`).trim();
-        servicio = rtk.slice(1).join(" ").trim() || "Servicio";
+    // ==== RESERVAR ====
+    if (lower === "reservar") {
+      const msg = renderTemplate(TEMPLATES.RESERVAR_GUIDE, { hashtag: negocioName });
+      return res.type("text/xml").send(twiml(msg));
+    }
+
+    if (lower.startsWith("reservar")) {
+      // Soporta: reservar YYYY-MM-DD HH:MM Nombre - Servicio
+      const regex = /reservar\s+(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})\s+(.+?)(?:\s*-\s*(.+))?$/i;
+      const mm = rawBody.normalize("NFKC").match(regex);
+      if (!mm) {
+        const msg = renderTemplate(TEMPLATES.RESERVAR_GUIDE, { hashtag: negocioName });
+        return res.type("text/xml").send(twiml(msg));
       }
-      if (!fecha || !hora || !cliente) {
-        return res
-          .type("text/xml")
-          .send(twiml('Formato: reservar YYYY-MM-DD HH:MM Nombre - Servicio'));
-      }
+
+      const fecha = mm[1];
+      const hora = mm[2];
+      const nombreCrudo = (mm[3] || "").trim();
+      const servicioCrudo = (mm[4] || "").trim();
+
+      const cliente = nombreCrudo || profile || (waid ? `WA:${waid}` : "Cliente");
+      const servicio = servicioCrudo || "Servicio";
 
       const id = genId();
-      // OJO: tu rpc_upsert_cita espera p_negocio_id = NOMBRE del negocio (ej. "spa_roma")
-      const p_negocio_id = negocioName || "spa_roma"; // <-- PON aquí el nombre real de tu negocio si no usas hashtag
-
       try {
+        // Tu RPC espera p_negocio_id = NOMBRE del negocio (texto)
         await rpc("rpc_upsert_cita", {
-          p_secret: bizSecret,
+          p_secret: BUSINESS_API_SECRET,
           p_id: id,
-          p_negocio_id, // name, no uuid
+          p_negocio_id: negocioName,
           p_fecha: fecha,
           p_hora: hora,
           p_cliente: cliente,
@@ -153,27 +274,44 @@ app.post("/whatsapp", async (req, res) => {
           p_calendar_event_id: "",
         });
 
-        const msg =
-          `✅ Cita creada\n` +
-          `ID: ${id}\n` +
-          `Fecha: ${fecha} ${hora}\n` +
-          `Cliente: ${cliente}\n` +
-          `Servicio: ${servicio}`;
+        const msg = renderTemplate(TEMPLATES.CONFIRM, {
+          id,
+          client: cliente,
+          service: servicio,
+          date: fecha,
+          time: hora,
+          branch: BUSINESS_BRANCH,
+        });
         return res.type("text/xml").send(twiml(msg));
       } catch (e) {
-        return res
-          .type("text/xml")
-          .send(twiml(`⚠️ No se pudo reservar: ${String(e).slice(0, 180)}`));
+        return res.type("text/xml").send(twiml(`⚠️ No se pudo reservar: ${String(e).slice(0, 180)}`));
       }
     }
 
-    return res
-      .type("text/xml")
-      .send(twiml('No entendí. Escribe "ayuda" o usa "reservar ..." / "cancelar ..."'));
+    // ==== REPROGRAMAR ====
+    if (lower.startsWith("reprogramar")) {
+      const msg = renderTemplate(TEMPLATES.REPROGRAM, {
+        client: profile || (waid ? `WA:${waid}` : "Cliente"),
+        service: "servicio",
+      });
+      return res.type("text/xml").send(twiml(msg));
+    }
+
+    // ==== Desconocido → menú ====
+    const msg = renderTemplate(TEMPLATES.WELCOME, {
+      name: BUSINESS_NAME,
+      location: BUSINESS_LOCATION,
+      hours: BUSINESS_HOURS,
+      phone: BUSINESS_PHONE,
+      branch: BUSINESS_BRANCH,
+      hashtag: BUSINESS_HASHTAG,
+    });
+    return res.type("text/xml").send(twiml(msg));
   } catch (err) {
     return res.type("text/xml").send(twiml(`Error: ${String(err).slice(0, 180)}`));
   }
 });
 
+// ====== Start ======
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("AutoCitaMX listening on " + port));
