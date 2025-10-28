@@ -301,7 +301,8 @@ app.all("/whatsapp", async (req, res) => {
 
       const id = genId();
       try {
-        await rpc("rpc_upsert_cita", {
+        // 🔁 CAMBIO CLAVE: llamar a la nueva RPC que creaste en Supabase
+        await rpc("rpc_upsert_cita_v1", {
           p_secret: BUSINESS_API_SECRET,
           p_id: id,
           p_negocio_id: negocioName, // nombre del negocio (texto)
