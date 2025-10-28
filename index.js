@@ -1,3 +1,11 @@
+// ===== AutoCitaMX — index.js (versión ES Modules compatible con Render) =====
+import express from "express";
+import bodyParser from "body-parser";
+
+// No uses require. Usa import siempre que veas "require('...')"
+const app = express();
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.json());
 // ===== AutoCitaMX — index.js (Render, Twilio WhatsApp + Supabase RPCs 'citas') =====
 // Node 18+ (fetch nativo). Si usas Node <=16, instala node-fetch y cámbialo.
 
