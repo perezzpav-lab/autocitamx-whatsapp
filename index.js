@@ -1,10 +1,10 @@
-// ===== AutoCitaMX — index.js (Render, versión ES Modules Node 20) =====
+// ===== AutoCitaMX — index.js (Render, ES Modules, sin body-parser) =====
 import express from "express";
-import bodyParser from "body-parser";
 
 const app = express();
-app.use(bodyParser.urlencoded({ extended: true }));
-app.use(bodyParser.json());
+// Parsers nativos de Express:
+app.use(express.urlencoded({ extended: true })); // Twilio manda x-www-form-urlencoded
+app.use(express.json());
 
 // ====== ENV ======
 const {
@@ -13,6 +13,8 @@ const {
   BUSINESS_API_SECRET,
   DEFAULT_NEGOCIO_NAME,
   ENABLE_OUTBOUND = "true",
+
+  // Branding opcional (plantillas)
   BUSINESS_NAME = "Tu Negocio",
   BUSINESS_LOCATION = "Tu dirección o zona",
   BUSINESS_HOURS = "L–S 10:00–20:00",
@@ -149,6 +151,7 @@ app.post("/whatsapp", async (req, res) => {
     const body = rawBody.normalize("NFKC").replace(/\s+/g, " ").trim();
     const lower = body.toLowerCase();
 
+    // Detectar negocio por hashtag o usar default
     const mTag = rawBody.match(/#([a-z0-9_\-]+)/i);
     const negocioName =
       mTag?.[1]?.toLowerCase() ||
@@ -158,6 +161,7 @@ app.post("/whatsapp", async (req, res) => {
 
     if (!body) return res.type("text/xml").send(twiml(""));
 
+    // MENÚ
     if (["hola", "menu", "menú"].includes(lower)) {
       const msg = renderTemplate(TEMPLATES.WELCOME, {
         name: BUSINESS_NAME,
@@ -170,11 +174,13 @@ app.post("/whatsapp", async (req, res) => {
       return res.type("text/xml").send(twiml(msg));
     }
 
+    // AYUDA
     if (["ayuda", "help", "?"].includes(lower)) {
       const msg = renderTemplate(TEMPLATES.HELP, { hashtag: negocioName });
       return res.type("text/xml").send(twiml(msg));
     }
 
+    // CANCELAR
     if (lower.startsWith("cancelar")) {
       const id = body.split(" ")[1] || "";
       if (!id)
@@ -198,11 +204,13 @@ app.post("/whatsapp", async (req, res) => {
       }
     }
 
+    // RESERVAR (solo palabra)
     if (lower === "reservar") {
       const msg = renderTemplate(TEMPLATES.RESERVAR_GUIDE, { hashtag: negocioName });
       return res.type("text/xml").send(twiml(msg));
     }
 
+    // RESERVAR (con datos)
     if (lower.startsWith("reservar")) {
       const regex =
         /reservar\s+(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})\s+(.+?)(?:\s*-\s*(.+))?$/i;
@@ -222,7 +230,7 @@ app.post("/whatsapp", async (req, res) => {
         await rpc("rpc_upsert_cita", {
           p_secret: BUSINESS_API_SECRET,
           p_id: id,
-          p_negocio_id: negocioName,
+          p_negocio_id: negocioName, // tu RPC usa NOMBRE de negocio
           p_fecha: fecha,
           p_hora: hora,
           p_cliente: cliente,
@@ -250,6 +258,7 @@ app.post("/whatsapp", async (req, res) => {
       }
     }
 
+    // Desconocido → Menú
     const msg = renderTemplate(TEMPLATES.WELCOME, {
       name: BUSINESS_NAME,
       location: BUSINESS_LOCATION,
@@ -264,6 +273,6 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// ====== START SERVER ======
+// ====== START ======
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("✅ AutoCitaMX listening on port " + port));
