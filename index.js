@@ -152,82 +152,54 @@ async function rpc(fn, body) {
   try { return JSON.parse(txt); } catch { return txt; }
 }
 
-// ----- helpers para compatibilidad de campos EN/ES -----
+// ----- helpers EN/ES -----
 function pick(obj, keys = []) {
-  for (const k of keys) {
-    if (obj && Object.prototype.hasOwnProperty.call(obj, k) && obj[k] != null) return obj[k];
-  }
+  for (const k of keys) { if (obj && Object.prototype.hasOwnProperty.call(obj, k) && obj[k] != null) return obj[k]; }
   return undefined;
 }
-
-// extrae número de 'whatsapp:+521234...' -> '521234...'
 function extractWaIdFromFromField(fromStr = "") {
   const m = String(fromStr || "").match(/whatsapp:\+?(\d+)/i);
   return m ? m[1] : "";
 }
-
-// intenta leer id de wa desde metadatos (spanish key)
 function extractWaIdFromChannelMeta(metaStr = "") {
   try {
     const json = JSON.parse(metaStr);
     const ctx = json?.datos?.contexto || json?.context || {};
-    // nombres posibles
     return ctx["Id. de wa"] || ctx["wa_id"] || ctx["WaId"] || "";
-  } catch {
-    return "";
-  }
+  } catch { return ""; }
 }
 
 // ====== HEALTH ======
 app.get("/", (_req, res) => {
-  res
-    .status(200)
-    .send("✅ AutoCitaMX listening — /whatsapp (POST/GET) listo · /__echo (debug)");
+  res.status(200).send("✅ AutoCitaMX listening — /whatsapp (POST/GET) listo · /__echo (debug)");
 });
-
-// Debug
 app.all("/__echo", (req, res) => {
   res.status(200).json({ method: req.method, path: req.path, headers: req.headers, query: req.query, body: req.body });
 });
 
-// ====== WhatsApp Webhook (acepta POST de Twilio y GET para probar) ======
+// ====== WhatsApp Webhook ======
 app.all("/whatsapp", async (req, res) => {
   try {
     const isPost = req.method === "POST";
     const src = isPost ? req.body : req.query;
 
-    // Campos en inglés o español:
-    const rawBody =
-      pick(src, ["Body", "Cuerpo", "body", "Mensaje"]) ?? "";
-    const from =
-      pick(src, ["From", "De", "from"]) ?? "";
-    let waid =
-      pick(src, ["WaId", "waId", "WAID", "WaID", "Identificador de la wa", "Id. de wa"]) ?? "";
-    const profile =
-      pick(src, ["ProfileName", "Nombre del perfil", "profileName"]) ?? "";
+    const rawBody = pick(src, ["Body", "Cuerpo", "body", "Mensaje"]) ?? "";
+    const from    = pick(src, ["From", "De", "from"]) ?? "";
+    let waid      = pick(src, ["WaId", "waId", "WAID", "WaID", "Identificador de la wa", "Id. de wa"]) ?? "";
+    const profile = pick(src, ["ProfileName", "Nombre del perfil", "profileName"]) ?? "";
+    const channelMeta = pick(src, ["ChannelMetadata", "Metadatos del canal", "channelMetadata"]) ?? "";
 
-    // Canal/metadata (por si viene el waId ahí)
-    const channelMeta =
-      pick(src, ["ChannelMetadata", "Metadatos del canal", "channelMetadata"]) ?? "";
-
-    // Fallbacks para WaId
     if (!waid) waid = extractWaIdFromFromField(from);
     if (!waid && channelMeta) waid = extractWaIdFromChannelMeta(channelMeta);
 
-    const body = String(rawBody).normalize("NFKC").replace(/\s+/g, " ").trim();
+    const body  = String(rawBody).normalize("NFKC").replace(/\s+/g, " ").trim();
     const lower = body.toLowerCase();
 
-    // Detectar #negocio en texto o usar default
     const mTag = String(rawBody).match(/#([a-z0-9_\-]+)/i);
-    const negocioName =
-      (mTag?.[1]?.toLowerCase()) ||
-      DEFAULT_NEGOCIO_NAME ||
-      BUSINESS_HASHTAG ||
-      "mi_negocio";
+    const negocioName = (mTag?.[1]?.toLowerCase()) || DEFAULT_NEGOCIO_NAME || BUSINESS_HASHTAG || "mi_negocio";
 
     if (!body) return res.type("text/xml").send(twiml(""));
 
-    // ===== Menú / Hola =====
     if (["hola", "menu", "menú"].includes(lower)) {
       const msg = renderTemplate(TEMPLATES.WELCOME, {
         name: BUSINESS_NAME, location: BUSINESS_LOCATION, hours: BUSINESS_HOURS,
@@ -236,97 +208,79 @@ app.all("/whatsapp", async (req, res) => {
       return res.type("text/xml").send(twiml(msg));
     }
 
-    // ===== Numeritos de menú =====
     if (lower === "1") {
       const msg = renderTemplate(TEMPLATES.RESERVAR_GUIDE, { hashtag: negocioName });
       return res.type("text/xml").send(twiml(msg));
     }
     if (lower === "2") {
-      return res.type("text/xml").send(twiml(
-        '🔄 Para cambiar o cancelar:\n• "cancelar ID"\n• o envía un nuevo "reservar YYYY-MM-DD HH:MM Nombre - Servicio"'
-      ));
+      return res.type("text/xml").send(twiml('🔄 Para cambiar o cancelar:\n• "cancelar ID"\n• o envía un nuevo "reservar YYYY-MM-DD HH:MM Nombre - Servicio"'));
     }
     if (lower === "3") {
       const msg = renderTemplate(TEMPLATES.PRECIOS, { hashtag: negocioName });
       return res.type("text/xml").send(twiml(msg));
     }
 
-    // ===== Ayuda =====
     if (["ayuda", "help", "?"].includes(lower)) {
       const msg = renderTemplate(TEMPLATES.HELP, { hashtag: negocioName });
       return res.type("text/xml").send(twiml(msg));
     }
 
-    // ===== Cancelar =====
     if (lower.startsWith("cancelar")) {
       const id = body.split(" ")[1] || "";
       if (!id) return res.type("text/xml").send(twiml("Falta ID. Ej: cancelar ACMX-..."));
       try {
-        await rpc("rpc_patch_cita", {
-          p_secret: BUSINESS_API_SECRET,
-          p_id: id,
-          p_fields: { estado: "cancelada" },
-        });
-        const msg = renderTemplate(TEMPLATES.CANCEL_OK, {
-          id,
-          client: profile || (waid ? `WA:${waid}` : "Cliente"),
-          service: "",
-        });
+        await rpc("rpc_patch_cita", { p_secret: BUSINESS_API_SECRET, p_id: id, p_fields: { estado: "cancelada" } });
+        const msg = renderTemplate(TEMPLATES.CANCEL_OK, { id, client: profile || (waid ? `WA:${waid}` : "Cliente"), service: "" });
         return res.type("text/xml").send(twiml(msg));
       } catch (e) {
         return res.type("text/xml").send(twiml(`⚠️ No se pudo cancelar: ${String(e).slice(0, 180)}`));
       }
     }
 
-    // ===== Reservar (palabra suelta) =====
     if (lower === "reservar") {
       const msg = renderTemplate(TEMPLATES.RESERVAR_GUIDE, { hashtag: negocioName });
       return res.type("text/xml").send(twiml(msg));
     }
 
-    // ===== Reservar (con datos) =====
     if (lower.startsWith("reservar")) {
-      // Formato: reservar YYYY-MM-DD HH:MM Nombre - Servicio
-      const regex =
-        /reservar\s+(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})\s+(.+?)(?:\s*-\s*(.+))?$/i;
+      const regex = /reservar\s+(\d{4}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})\s+(.+?)(?:\s*-\s*(.+))?$/i;
       const mm = String(rawBody).normalize("NFKC").match(regex);
       if (!mm) {
         const msg = renderTemplate(TEMPLATES.RESERVAR_GUIDE, { hashtag: negocioName });
         return res.type("text/xml").send(twiml(msg));
       }
-      const fecha = mm[1];
-      const hora = mm[2];
+      const fecha   = mm[1];
+      const hora    = mm[2];
       const cliente = (mm[3] || profile || (waid ? `WA:${waid}` : "Cliente")).trim();
-      const servicio = (mm[4] || "Servicio").trim();
+      const servicio= (mm[4] || "Servicio").trim();
 
       const id = genId();
       try {
-        // 🔁 CAMBIO CLAVE: llamar a la nueva RPC que creaste en Supabase
-        await rpc("rpc_upsert_cita_v1", {
+        // ✅ NUEVO: usamos la RPC con 1 JSON (a prueba de nombres)
+        await rpc("rpc_upsert_cita_json", {
           p_secret: BUSINESS_API_SECRET,
-          p_id: id,
-          p_negocio_id: negocioName, // nombre del negocio (texto)
-          p_fecha: fecha,
-          p_hora: hora,
-          p_cliente: cliente,
-          p_telefono: waid ? `+${waid}` : "", // ya incluye país
-          p_servicio: servicio,
-          p_estado: "confirmada",
-          p_monto: 0,
-          p_forma_pago: "",
-          p_calendar_event_id: "",
+          p: {
+            id,
+            negocio_id: negocioName,
+            fecha,
+            hora,
+            cliente,
+            telefono: waid ? `+${waid}` : "",
+            servicio,
+            estado: "confirmada",
+            monto: 0,
+            forma_pago: "",
+            calendar_event_id: ""
+          }
         });
 
-        const msg = renderTemplate(TEMPLATES.CONFIRM, {
-          id, client: cliente, service: servicio, date: fecha, time: hora, branch: BUSINESS_BRANCH,
-        });
+        const msg = renderTemplate(TEMPLATES.CONFIRM, { id, client: cliente, service: servicio, date: fecha, time: hora, branch: BUSINESS_BRANCH });
         return res.type("text/xml").send(twiml(msg));
       } catch (e) {
         return res.type("text/xml").send(twiml(`⚠️ No se pudo reservar: ${String(e).slice(0, 180)}`));
       }
     }
 
-    // ===== Desconocido → Menú =====
     const msg = renderTemplate(TEMPLATES.WELCOME, {
       name: BUSINESS_NAME, location: BUSINESS_LOCATION, hours: BUSINESS_HOURS,
       phone: BUSINESS_PHONE, branch: BUSINESS_BRANCH, hashtag: BUSINESS_HASHTAG,
